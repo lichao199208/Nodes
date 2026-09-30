@@ -318,7 +318,7 @@ if __name__ == "__main__":
         # auth.login_otp(email, otp)
 
         # ── 方式 B：密码登录 ──
-        # turnstile_token = "从浏览器或打码平台获取"
+        # turnstile_token = "YOUR_SECRET_HERE"
         # auth.login_password("you@example.com", "YourPass123", turnstile_token)
 
         # ── 方式 C：注册新账号 ──

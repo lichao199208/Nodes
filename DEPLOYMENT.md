@@ -1,8 +1,9 @@
 # Nodes server deployment
 
-- Source: https://github.com/lichao199208/Nodes (fork of kingenbomb/Nodes)
-- Image: `nodes:20260918-yunxin4-dashboard`
+- Source: https://github.com/lichao199208/Nodes (desensitized fork of kingenbomb/Nodes)
+- Commit: `1216835354d0c68b768b59ce137b75f40fe3e9ac`
 - Install root: `/opt/nodes`
+- Image: `nodes:1216835-yunxin4-dashboard`
 - Interactive launcher: `/usr/local/bin/nodes`
 
 The project provides both an interactive CLI and an authenticated Web dashboard.
@@ -65,7 +66,7 @@ port `443` site.
 - Active release: `/opt/nodes/releases/1216835-yunxin4-dashboard`
 - Previous release: `/opt/nodes/releases/1216835-yunxin3-onboarding`
 - Image: `nodes:1216835-yunxin4-dashboard`
-- Dashboard: HTTPS on port `8443` of your own host
+- Dashboard: `https://YOUR_DASHBOARD_HOST:8443`
 - Automated tests: 16 passed inside the Linux image
 - Browser tests: desktop and 390x844 mobile viewports both passed against the
   public HTTPS deployment; navigation, form states, and horizontal overflow were
@@ -80,14 +81,8 @@ port `443` site.
 - Onboarding validation: the free Premium DC trial was claimed, an `AccountID`
   was created, and 100 unique HTTP proxy URLs were exported
 - Credential-bearing account and proxy output files are created with mode `0600`
-
-## 2026-09-18 container snapshot
-
-- Image: `nodes:20260918-yunxin4-dashboard`
-- Same tree as this repository after sanitizing local gateway/mail defaults
-- Dashboard export: live proxies (8 per healthy account), GPT gateway list, Clash YAML, Shadowrocket URI
-- Clash Verge can use `/api/export/clash.yml?token=` or download YAML while logged in
-- Docker Compose example: `compose.yml` (build context is the repo root)
+- Validation outputs: `account/accounts_20260917_131641.jsonl` and
+  `node/proxies_20260917_131641.txt`
 
 Run:
 

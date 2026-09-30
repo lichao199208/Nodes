@@ -4,6 +4,7 @@
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -11,6 +12,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 
 from flask import (
     Flask,
@@ -28,6 +30,8 @@ from werkzeug.security import check_password_hash
 import requests
 
 import pool
+import platform_store
+import proxy_quality
 import proxyscrape_register as worker
 
 
@@ -77,7 +81,152 @@ SETTINGS_KEYS = (
     "http_proxy",
     "https_proxy",
     "no_proxy",
+    "export_proxy_protocol",
+    "resin_gateway_host",
+    "resin_gateway_public_host",
+    "resin_gateway_port",
+    "resin_gateway_platform",
+    "pull_api_base",
+    "pull_api_user",
+    "pull_api_pass",
+    "pull_api_shuliang",
+    "pull_api_id",
+    "proxy_quality_enabled",
+    "proxy_max_latency_ms",
+    "proxy_exclude_countries",
+    "proxy_arp_check_enabled",
+    "proxy_arp_probe_url",
+    "arp_publish_url",
+    "arp_publish_token",
+    "proxy_quality_workers",
+    "proxy_quality_cache_ttl_sec",
+    "quality_profile_id",
+    "export_quality_profile",
 )
+
+QUALITY_FLAT_KEYS = (
+    "proxy_quality_enabled",
+    "proxy_max_latency_ms",
+    "proxy_exclude_countries",
+    "proxy_arp_check_enabled",
+    "proxy_arp_probe_url",
+    "arp_publish_url",
+    "arp_publish_token",
+    "proxy_quality_workers",
+    "proxy_quality_cache_ttl_sec",
+)
+
+BUILTIN_QUALITY_PROFILES = {
+    "default": {
+        "id": "default",
+        "name": "默认",
+        "proxy_quality_enabled": True,
+        "proxy_max_latency_ms": 3000,
+        "proxy_exclude_countries": "US",
+        "proxy_arp_check_enabled": True,
+        "proxy_arp_probe_url": "https://firefly-3p.ff.adobe.io/",
+        "arp_publish_url": "",
+        "arp_publish_token": "",
+        "proxy_quality_workers": 16,
+        "proxy_quality_cache_ttl_sec": 600,
+    },
+    "arp-strict": {
+        "id": "arp-strict",
+        "name": "ARP 严格",
+        "proxy_quality_enabled": True,
+        "proxy_max_latency_ms": 2000,
+        "proxy_exclude_countries": "US",
+        "proxy_arp_check_enabled": True,
+        "proxy_arp_probe_url": "https://firefly-3p.ff.adobe.io/",
+        "arp_publish_url": "",
+        "arp_publish_token": "",
+        "proxy_quality_workers": 16,
+        "proxy_quality_cache_ttl_sec": 600,
+    },
+    "geo-only": {
+        "id": "geo-only",
+        "name": "仅地理/延迟",
+        "proxy_quality_enabled": True,
+        "proxy_max_latency_ms": 3000,
+        "proxy_exclude_countries": "US",
+        "proxy_arp_check_enabled": False,
+        "proxy_arp_probe_url": "https://firefly-3p.ff.adobe.io/",
+        "arp_publish_url": "",
+        "arp_publish_token": "",
+        "proxy_quality_workers": 16,
+        "proxy_quality_cache_ttl_sec": 600,
+    },
+}
+
+# Logical groups for GET/PUT; file remains flat JSON.
+SETTINGS_GROUPS = {
+    "sources": (
+        "pull_api_base",
+        "pull_api_user",
+        "pull_api_pass",
+        "pull_api_shuliang",
+        "pull_api_id",
+        "export_proxy_protocol",
+    ),
+    "quality": (
+        "proxy_quality_enabled",
+        "proxy_max_latency_ms",
+        "proxy_exclude_countries",
+        "proxy_arp_check_enabled",
+        "proxy_arp_probe_url",
+        "arp_publish_url",
+        "arp_publish_token",
+        "proxy_quality_workers",
+        "proxy_quality_cache_ttl_sec",
+        "quality_profile_id",
+        "export_quality_profile",
+    ),
+    "registration": (
+        "mail_provider",
+        "mail_api_base",
+        "mail_api_key",
+        "mail_type",
+        "mail_suffix",
+        "mail_domain",
+        "yyds_api_key",
+        "yyds_domain",
+        "captcha_provider",
+        "captcha_api_key",
+        "captcha_api_base",
+        "captcha_timeout",
+        "captcha_poll_interval",
+        "turnstile_extension_path",
+        "proxy_enabled",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ),
+    "exports": (
+        "export_proxy_protocol",
+        "export_quality_profile",
+        "resin_gateway_host",
+        "resin_gateway_public_host",
+        "resin_gateway_port",
+        "resin_gateway_platform",
+    ),
+}
+
+
+def _mask_secret(value):
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return "*" * len(text)
+    return f"{text[:2]}{'*' * max(4, len(text) - 4)}{text[-2:]}"
+
+
+def _pull_api_int(value, default, minimum=1, maximum=100000):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
 
 
 def _public_settings(config):
@@ -100,7 +249,182 @@ def _public_settings(config):
         "http_proxy": str(config.get("http_proxy") or ""),
         "https_proxy": str(config.get("https_proxy") or ""),
         "no_proxy": str(config.get("no_proxy") or "localhost,127.0.0.1"),
+        "export_proxy_protocol": _export_protocol_from_config(config),
+        "resin_gateway_host": str(config.get("resin_gateway_host") or pool.DEFAULT_GATEWAY_HOST).strip() or pool.DEFAULT_GATEWAY_HOST,
+        "resin_gateway_public_host": str(config.get("resin_gateway_public_host") or "").strip(),
+        "resin_gateway_port": max(1, min(65535, pool._as_int(config.get("resin_gateway_port"), pool.DEFAULT_GATEWAY_PORT))),
+        "resin_gateway_platform": str(config.get("resin_gateway_platform") or pool.DEFAULT_PLATFORM).strip() or pool.DEFAULT_PLATFORM,
+        "pull_api_base": str(config.get("pull_api_base") or "").strip(),
+        "pull_api_user": str(config.get("pull_api_user") or "").strip(),
+        "pull_api_pass": str(config.get("pull_api_pass") or ""),
+        "pull_api_shuliang": _pull_api_int(config.get("pull_api_shuliang"), 100, 1, 10000),
+        "pull_api_id": _pull_api_int(config.get("pull_api_id"), 1, 1, 100000),
+        "proxy_quality_enabled": proxy_quality._as_bool(config.get("proxy_quality_enabled"), True),
+        "proxy_max_latency_ms": int(proxy_quality.quality_settings(config)["max_latency_ms"]),
+        "proxy_exclude_countries": ",".join(proxy_quality.quality_settings(config)["exclude_countries"]),
+        "proxy_arp_check_enabled": proxy_quality._as_bool(config.get("proxy_arp_check_enabled"), True),
+        "proxy_arp_probe_url": str(config.get("proxy_arp_probe_url") or proxy_quality.DEFAULT_ARP_PROBE_URL).strip(),
+        "arp_publish_url": str(config.get("arp_publish_url") or "").strip(),
+        "arp_publish_token": str(config.get("arp_publish_token") or ""),
+        "proxy_quality_workers": int(proxy_quality.quality_settings(config)["workers"]),
+        "proxy_quality_cache_ttl_sec": int(proxy_quality.quality_settings(config)["cache_ttl_sec"]),
+        "proxy_quality_version": int(config.get("proxy_quality_version") or 0),
+        "proxy_quality_updated_at": str(config.get("proxy_quality_updated_at") or ""),
+        "quality_profile_id": str(config.get("quality_profile_id") or "default").strip() or "default",
+        "export_quality_profile": str(
+            config.get("export_quality_profile") or config.get("quality_profile_id") or "default"
+        ).strip() or "default",
     }
+
+
+def _profile_id_clean(value, default="default"):
+    text = str(value or "").strip().lower().replace(" ", "-")
+    text = re.sub(r"[^a-z0-9_\-]+", "", text)
+    return text or default
+
+
+def _quality_fields_dict(source):
+    data = source if isinstance(source, dict) else {}
+    qcfg = proxy_quality.quality_settings(data)
+    return {
+        "proxy_quality_enabled": bool(qcfg["enabled"]),
+        "proxy_max_latency_ms": int(qcfg["max_latency_ms"]),
+        "proxy_exclude_countries": ",".join(qcfg["exclude_countries"]),
+        "proxy_arp_check_enabled": bool(qcfg["arp_check_enabled"]),
+        "proxy_arp_probe_url": str(data.get("proxy_arp_probe_url") or qcfg["arp_probe_url"]).strip(),
+        "arp_publish_url": str(data.get("arp_publish_url") or "").strip(),
+        "arp_publish_token": str(data.get("arp_publish_token") or ""),
+        "proxy_quality_workers": int(qcfg["workers"]),
+        "proxy_quality_cache_ttl_sec": int(qcfg["cache_ttl_sec"]),
+    }
+
+
+def _ensure_quality_profiles(config):
+    """Return profiles dict, seeding builtins + mirroring flat keys into active profile."""
+    cfg = config if isinstance(config, dict) else {}
+    raw = cfg.get("quality_profiles")
+    profiles = dict(raw) if isinstance(raw, dict) else {}
+    for pid, preset in BUILTIN_QUALITY_PROFILES.items():
+        if pid not in profiles or not isinstance(profiles.get(pid), dict):
+            profiles[pid] = dict(preset)
+        else:
+            merged = dict(preset)
+            merged.update({k: profiles[pid].get(k, preset.get(k)) for k in (*QUALITY_FLAT_KEYS, "name", "id", "version", "updated_at")})
+            merged["id"] = pid
+            profiles[pid] = merged
+    active = _profile_id_clean(cfg.get("quality_profile_id"), "default")
+    if active not in profiles:
+        active = "default"
+    # Mirror current flat config into the active profile so legacy edits stay visible.
+    flat = _quality_fields_dict(cfg)
+    active_row = dict(profiles.get(active) or BUILTIN_QUALITY_PROFILES["default"])
+    active_row.update(flat)
+    active_row["id"] = active
+    active_row["name"] = active_row.get("name") or active
+    active_row["version"] = int(cfg.get("proxy_quality_version") or active_row.get("version") or 0)
+    active_row["updated_at"] = str(cfg.get("proxy_quality_updated_at") or active_row.get("updated_at") or "")
+    profiles[active] = active_row
+    return profiles, active
+
+
+def _profiles_public(config):
+    profiles, active = _ensure_quality_profiles(config)
+    export_id = _profile_id_clean(
+        config.get("export_quality_profile") or active, active,
+    )
+    if export_id not in profiles:
+        export_id = active
+    return {
+        "active_id": active,
+        "export_id": export_id,
+        "profiles": [
+            {
+                "id": pid,
+                "name": row.get("name") or pid,
+                "version": int(row.get("version") or 0),
+                "updated_at": str(row.get("updated_at") or ""),
+                "builtin": pid in BUILTIN_QUALITY_PROFILES,
+                **{key: row.get(key) for key in QUALITY_FLAT_KEYS},
+            }
+            for pid, row in sorted(profiles.items(), key=lambda item: item[0])
+            if isinstance(row, dict)
+        ],
+    }
+
+
+def _config_for_quality(config=None, rule_id=None):
+    """Flat config with quality fields resolved from the requested profile."""
+    cfg = dict(config if isinstance(config, dict) else _read_config())
+    profiles, active = _ensure_quality_profiles(cfg)
+    wanted = _profile_id_clean(rule_id or cfg.get("export_quality_profile") or active, active)
+    row = profiles.get(wanted) or profiles.get(active) or BUILTIN_QUALITY_PROFILES["default"]
+    for key in QUALITY_FLAT_KEYS:
+        if key in row:
+            cfg[key] = row[key]
+    cfg["quality_profile_id"] = wanted
+    return cfg
+
+
+def _apply_profile_to_config(next_config, profile_id, fields, bump_version=True):
+    pid = _profile_id_clean(profile_id, "default")
+    profiles, _active = _ensure_quality_profiles(next_config)
+    row = dict(profiles.get(pid) or BUILTIN_QUALITY_PROFILES.get(pid) or {"id": pid, "name": pid})
+    row.update(_quality_fields_dict({**row, **fields}))
+    row["id"] = pid
+    row["name"] = str(fields.get("name") or row.get("name") or pid)
+    if bump_version:
+        try:
+            row["version"] = int(row.get("version") or 0) + 1
+        except (TypeError, ValueError):
+            row["version"] = 1
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+    profiles[pid] = row
+    next_config["quality_profiles"] = profiles
+    next_config["quality_profile_id"] = pid
+    for key in QUALITY_FLAT_KEYS:
+        next_config[key] = row[key]
+    if bump_version:
+        next_config["proxy_quality_version"] = int(row["version"])
+        next_config["proxy_quality_updated_at"] = row["updated_at"]
+    return row
+
+
+def _settings_for_group(config, group):
+    public = _public_settings(config)
+    keys = SETTINGS_GROUPS.get(group)
+    if not keys:
+        raise ValueError(f"未知配置分组: {group}")
+    return {key: public[key] for key in keys if key in public}
+
+
+def _is_local_shortcircuit_base(base):
+    """True when pull_api_base points at this Nodes /api (avoid recursive HTTP)."""
+    base_l = str(base or "").strip().lower()
+    if not base_l:
+        return False
+    # Historical 8892 compat listener — always local pool.
+    if ":8892/" in base_l or base_l.rstrip("/").endswith(":8892") or ":8892?" in base_l:
+        return True
+    local_hosts = ("127.0.0.1", "localhost", "[::1]", "::1")
+    if any(host in base_l for host in local_hosts):
+        stripped = base_l.rstrip("/")
+        if stripped.endswith("/api") or "/nodes/api" in stripped:
+            return True
+    return False
+
+
+def _export_protocol_from_config(config=None):
+    cfg = config if isinstance(config, dict) else _read_config()
+    try:
+        return worker.normalize_proxy_protocol(cfg.get("export_proxy_protocol"), default="http")
+    except ValueError:
+        return "http"
+
+
+def _resolve_export_protocol(override=None):
+    if override is not None and str(override).strip():
+        return worker.normalize_proxy_protocol(override, default=_export_protocol_from_config())
+    return _export_protocol_from_config()
 
 
 def _clean_url(value, field):
@@ -118,7 +442,14 @@ def _apply_settings(payload):
     current = _read_config()
     next_config = dict(current)
     data = payload if isinstance(payload, dict) else {}
-    incoming = {key: data[key] for key in SETTINGS_KEYS if key in data}
+    group = str(data.get("group") or "").strip().lower()
+    if group:
+        if group not in SETTINGS_GROUPS:
+            raise ValueError(f"未知配置分组: {group}")
+        allowed = set(SETTINGS_GROUPS[group])
+        incoming = {key: data[key] for key in SETTINGS_KEYS if key in data and key in allowed}
+    else:
+        incoming = {key: data[key] for key in SETTINGS_KEYS if key in data}
     if not incoming:
         raise ValueError("没有可保存的配置项")
 
@@ -138,38 +469,248 @@ def _apply_settings(payload):
     if not 5 <= poll <= 60:
         raise ValueError("打码轮询间隔必须在 5-60 秒")
 
-    next_config["mail_provider"] = mail_provider
-    next_config["mail_api_base"] = _clean_url(merged["mail_api_base"], "邮箱 API 地址")
-    next_config["mail_api_key"] = str(merged["mail_api_key"] or "").strip()
-    next_config["mail_type"] = str(merged["mail_type"] or "mail").strip() or "mail"
-    next_config["mail_suffix"] = str(merged["mail_suffix"] or "mail.com").strip() or "mail.com"
-    next_config["mail_domain"] = str(merged["mail_domain"] or "").strip()
-    next_config["yyds_api_key"] = str(merged["yyds_api_key"] or "").strip()
-    next_config["yyds_domain"] = str(merged["yyds_domain"] or "").strip()
-    next_config["captcha_provider"] = captcha_provider
-    next_config["captcha_api_key"] = str(merged["captcha_api_key"] or "").strip()
-    next_config["captcha_api_base"] = _clean_url(merged["captcha_api_base"], "打码 API 地址") or "https://api.2captcha.com"
-    next_config["captcha_timeout"] = timeout
-    next_config["captcha_poll_interval"] = poll
-    next_config["turnstile_extension_path"] = str(merged["turnstile_extension_path"] or "").strip()
-    next_config["proxy_enabled"] = _as_bool(merged["proxy_enabled"])
-    next_config["http_proxy"] = str(merged["http_proxy"] or "").strip()
-    next_config["https_proxy"] = str(merged["https_proxy"] or "").strip()
-    next_config["no_proxy"] = str(merged["no_proxy"] or "localhost,127.0.0.1").strip() or "localhost,127.0.0.1"
+    # Only rewrite registration/mail/captcha keys when they were submitted.
+    mail_keys = {
+        "mail_provider", "mail_api_base", "mail_api_key", "mail_type", "mail_suffix",
+        "mail_domain", "yyds_api_key", "yyds_domain",
+    }
+    captcha_keys = {
+        "captcha_provider", "captcha_api_key", "captcha_api_base", "captcha_timeout",
+        "captcha_poll_interval", "turnstile_extension_path",
+    }
+    egress_keys = {"proxy_enabled", "http_proxy", "https_proxy", "no_proxy"}
+    mail_touch = bool(set(incoming) & mail_keys) or (not group and bool(set(incoming) & set(SETTINGS_GROUPS["registration"])))
+    captcha_touch = bool(set(incoming) & captcha_keys) or (not group and bool(set(incoming) & set(SETTINGS_GROUPS["registration"])))
+    egress_touch = bool(set(incoming) & egress_keys) or (not group and bool(set(incoming) & set(SETTINGS_GROUPS["registration"])))
+    # Flat PUT without group still updates the whole registration block when any registration key is present.
+    if not group and bool(set(incoming) & set(SETTINGS_GROUPS["registration"])):
+        mail_touch = captcha_touch = egress_touch = True
 
-    if next_config["http_proxy"]:
-        _clean_url(next_config["http_proxy"], "HTTP 代理")
-    if next_config["https_proxy"]:
-        _clean_url(next_config["https_proxy"], "HTTPS 代理")
-    if mail_provider == "yunxin" and not next_config["mail_api_base"]:
-        raise ValueError("云芯邮箱需要填写 API 地址")
-    if captcha_provider == "2captcha" and not next_config["captcha_api_key"]:
-        raise ValueError("2Captcha 需要填写 API Key")
+    if mail_touch:
+        next_config["mail_provider"] = mail_provider
+        next_config["mail_api_base"] = _clean_url(merged["mail_api_base"], "邮箱 API 地址")
+        next_config["mail_api_key"] = str(merged["mail_api_key"] or "").strip()
+        next_config["mail_type"] = str(merged["mail_type"] or "mail").strip() or "mail"
+        next_config["mail_suffix"] = str(merged["mail_suffix"] or "mail.com").strip() or "mail.com"
+        next_config["mail_domain"] = str(merged["mail_domain"] or "").strip()
+        next_config["yyds_api_key"] = str(merged["yyds_api_key"] or "").strip()
+        next_config["yyds_domain"] = str(merged["yyds_domain"] or "").strip()
+        if mail_provider == "yunxin" and not next_config["mail_api_base"]:
+            raise ValueError("云芯邮箱需要填写 API 地址")
+    if captcha_touch:
+        next_config["captcha_provider"] = captcha_provider
+        next_config["captcha_api_key"] = str(merged["captcha_api_key"] or "").strip()
+        next_config["captcha_api_base"] = _clean_url(merged["captcha_api_base"], "打码 API 地址") or "https://api.2captcha.com"
+        next_config["captcha_timeout"] = timeout
+        next_config["captcha_poll_interval"] = poll
+        next_config["turnstile_extension_path"] = str(merged["turnstile_extension_path"] or "").strip()
+        if captcha_provider == "2captcha" and not next_config["captcha_api_key"]:
+            raise ValueError("2Captcha 需要填写 API Key")
+    if egress_touch:
+        next_config["proxy_enabled"] = _as_bool(merged["proxy_enabled"])
+        next_config["http_proxy"] = str(merged["http_proxy"] or "").strip()
+        next_config["https_proxy"] = str(merged["https_proxy"] or "").strip()
+        next_config["no_proxy"] = str(merged["no_proxy"] or "localhost,127.0.0.1").strip() or "localhost,127.0.0.1"
+        if next_config["http_proxy"]:
+            _clean_url(next_config["http_proxy"], "HTTP 代理")
+        if next_config["https_proxy"]:
+            _clean_url(next_config["https_proxy"], "HTTPS 代理")
+
+    if "export_proxy_protocol" in incoming:
+        next_config["export_proxy_protocol"] = worker.normalize_proxy_protocol(
+            merged.get("export_proxy_protocol"), default="http",
+        )
+
+    gateway_keys = {
+        "resin_gateway_host", "resin_gateway_public_host",
+        "resin_gateway_port", "resin_gateway_platform",
+    }
+    if gateway_keys & set(incoming):
+        host = str(merged.get("resin_gateway_host") or pool.DEFAULT_GATEWAY_HOST).strip() or pool.DEFAULT_GATEWAY_HOST
+        public_host = str(merged.get("resin_gateway_public_host") or "").strip()
+        platform = str(merged.get("resin_gateway_platform") or pool.DEFAULT_PLATFORM).strip() or pool.DEFAULT_PLATFORM
+        next_config["resin_gateway_host"] = host
+        next_config["resin_gateway_public_host"] = public_host
+        next_config["resin_gateway_port"] = max(
+            1, min(65535, pool._as_int(merged.get("resin_gateway_port"), pool.DEFAULT_GATEWAY_PORT)),
+        )
+        next_config["resin_gateway_platform"] = platform
+
+    if "pull_api_base" in incoming or "pull_api_user" in incoming or "pull_api_pass" in incoming \
+            or "pull_api_shuliang" in incoming or "pull_api_id" in incoming:
+        pull_base = str(merged.get("pull_api_base") or "").strip()
+        if pull_base:
+            pull_base = _clean_url(pull_base, "API 拉代理地址")
+        next_config["pull_api_base"] = pull_base
+        next_config["pull_api_user"] = str(merged.get("pull_api_user") or "").strip()
+        next_config["pull_api_pass"] = str(merged.get("pull_api_pass") or "")
+        next_config["pull_api_shuliang"] = _pull_api_int(merged.get("pull_api_shuliang"), 100, 1, 10000)
+        next_config["pull_api_id"] = _pull_api_int(merged.get("pull_api_id"), 1, 1, 100000)
+
+    quality_keys = set(QUALITY_FLAT_KEYS)
+    profile_keys = {"quality_profile_id", "export_quality_profile"}
+    if (quality_keys | profile_keys) & set(incoming):
+        requested_profile = _profile_id_clean(
+            incoming.get("quality_profile_id")
+            if "quality_profile_id" in incoming
+            else next_config.get("quality_profile_id") or "default",
+            "default",
+        )
+
+        if quality_keys & set(incoming):
+            field_source = {**current, **merged}
+            arp_probe = str(field_source.get("proxy_arp_probe_url") or "").strip()
+            if arp_probe:
+                arp_probe = _clean_url(arp_probe, "ARP 探测地址")
+            field_source["proxy_arp_probe_url"] = arp_probe or proxy_quality.DEFAULT_ARP_PROBE_URL
+            publish_url = str(field_source.get("arp_publish_url") or "").strip()
+            if publish_url:
+                publish_url = _clean_url(publish_url, "ARP publish 地址")
+            field_source["arp_publish_url"] = publish_url
+            row = _apply_profile_to_config(next_config, requested_profile, field_source, bump_version=True)
+            platform_store.append_audit(
+                WEB_DATA_DIR,
+                kind="quality",
+                action="update_profile",
+                detail={
+                    "profile_id": row["id"],
+                    "version": row.get("version"),
+                    "max_latency_ms": row.get("proxy_max_latency_ms"),
+                    "exclude_countries": row.get("proxy_exclude_countries"),
+                    "arp_check_enabled": row.get("proxy_arp_check_enabled"),
+                },
+            )
+        elif "quality_profile_id" in incoming:
+            profiles, _ = _ensure_quality_profiles(next_config)
+            if requested_profile not in profiles:
+                raise ValueError(f"未知质检 profile: {requested_profile}")
+            row = profiles[requested_profile]
+            next_config["quality_profile_id"] = requested_profile
+            for key in QUALITY_FLAT_KEYS:
+                if key in row:
+                    next_config[key] = row[key]
+            platform_store.append_audit(
+                WEB_DATA_DIR,
+                kind="quality",
+                action="activate_profile",
+                detail={"profile_id": requested_profile, "version": row.get("version")},
+            )
+
+        if "export_quality_profile" in incoming:
+            export_id = _profile_id_clean(
+                incoming.get("export_quality_profile"),
+                next_config.get("quality_profile_id") or "default",
+            )
+            profiles, _ = _ensure_quality_profiles(next_config)
+            if export_id not in profiles:
+                raise ValueError(f"未知出口绑定 profile: {export_id}")
+            next_config["export_quality_profile"] = export_id
+            platform_store.append_audit(
+                WEB_DATA_DIR,
+                kind="quality",
+                action="bind_export_profile",
+                detail={"export_quality_profile": export_id},
+            )
+        elif "export_quality_profile" not in next_config:
+            next_config["export_quality_profile"] = next_config.get("quality_profile_id") or "default"
 
     _atomic_json(CONFIG_FILE, next_config)
     if hasattr(worker, "reload_settings"):
         worker.reload_settings()
     return _public_settings(next_config)
+
+
+def _pull_api_public(config=None):
+    """Effective client-facing pull-API account (same source as settings)."""
+    from urllib.parse import urlencode
+
+    cfg = config if isinstance(config, dict) else _read_config()
+    settings = _public_settings(cfg)
+    base = settings["pull_api_base"]
+    user = settings["pull_api_user"]
+    password = settings["pull_api_pass"]
+    shuliang = settings["pull_api_shuliang"]
+    api_id = settings["pull_api_id"]
+    scheme = settings["export_proxy_protocol"]
+    params = {
+        "user": user,
+        "pass": password,
+        "shuliang": shuliang,
+        "id": api_id,
+        "scheme": scheme,
+    }
+    params_masked = dict(params)
+    params_masked["pass"] = _mask_secret(password)
+    query = urlencode(params)
+    query_masked = urlencode(params_masked)
+    request_url = f"{base}?{query}" if base else ""
+    request_url_masked = f"{base}?{query_masked}" if base else ""
+    qcfg = proxy_quality.quality_settings(cfg)
+    public_base = ""
+    try:
+        public_base = _public_base()
+    except Exception:
+        public_base = ""
+    token = ""
+    try:
+        token = _export_token()
+    except Exception:
+        token = ""
+    export_rule = settings.get("export_quality_profile") or settings.get("quality_profile_id") or "default"
+    qualified_query = urlencode({
+        "token": token,
+        "scheme": scheme,
+        "shuliang": shuliang,
+        "rule": export_rule,
+    }) if token else ""
+    qualified_url = f"{public_base}/api/export/qualified-proxies?{qualified_query}" if public_base and token else ""
+    configured = bool(base and user)
+    local_shortcircuit = configured and _is_local_shortcircuit_base(base)
+    if not configured:
+        pull_mode = "unconfigured"
+    elif local_shortcircuit:
+        pull_mode = "local_shortcircuit"
+    else:
+        pull_mode = "external"
+    compat_url_masked = f"{base}?{query_masked}" if base else ""
+    return {
+        "api": base,
+        "user": user,
+        "pass": password,
+        "pass_masked": _mask_secret(password),
+        "shuliang": shuliang,
+        "id": api_id,
+        "scheme": scheme,
+        "query": query,
+        "query_masked": query_masked,
+        "request_url": request_url,
+        "request_url_masked": request_url_masked,
+        "compat_url_masked": compat_url_masked,
+        "configured": configured,
+        "local_shortcircuit": local_shortcircuit,
+        "pull_mode": pull_mode,
+        "pull_mode_note": (
+            "外部上游与本地 8892/api 短路互斥：指向本机 /api 或 :8892 时读账号池，否则 HTTP 拉外部列表。"
+        ),
+        "quality": {
+            "enabled": bool(qcfg["enabled"]),
+            "max_latency_ms": int(qcfg["max_latency_ms"]),
+            "exclude_countries": list(qcfg["exclude_countries"]),
+            "arp_check_enabled": bool(qcfg["arp_check_enabled"]),
+            "arp_probe_url": qcfg["arp_probe_url"],
+            "arp_publish_url": qcfg["arp_publish_url"],
+            "arp_mapping": {
+                "ARP4": "sid + ark + bfp + ftr，且 ftr 含 v2_tt（对齐 adobe.DecodePoolARPToken）",
+                "publish_200": "ARP 路径探测成功；若配置 arp_publish_url 则需 HTTP 200",
+                "latency": f"<= {qcfg['max_latency_ms']} ms",
+                "country": f"排除 {','.join(qcfg['exclude_countries'])}",
+            },
+            "version": int(settings.get("proxy_quality_version") or 0),
+            "updated_at": settings.get("proxy_quality_updated_at") or "",
+        },
+        "qualified_url": qualified_url,
+        "qualified_url_note": "客户端请优先用质检后地址；上游 8892 原始列表会经 ARP/延迟/国家过滤后再返回。",
+    }
 
 
 CONFIG = _read_config()
@@ -442,21 +983,171 @@ def _can_export_clash():
     return _request_has_export_token() or _is_authenticated()
 
 
-def _pool_snapshot():
+def _pool_snapshot(probe_missing=False, rule_id=None):
     settings = pool.pool_settings(_read_config())
+    raw = _read_config()
+    config = _config_for_quality(raw, rule_id=rule_id)
     entries = pool.live_entries(_account_records(), NODE_DIR, settings, time.time())
+    qcfg = proxy_quality.quality_settings(config)
+    quality_report = {
+        "enabled": bool(qcfg["enabled"]),
+        "scanned": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "profile_id": config.get("quality_profile_id") or "default",
+    }
+    if qcfg["enabled"] and entries:
+        filtered = []
+        scanned = accepted = rejected = skipped = 0
+        scheme = _export_protocol_from_config(raw)
+        for item in entries:
+            hosts, report = proxy_quality.filter_host_list(
+                item.get("slots") or [],
+                item.get("proxy_username") or "",
+                item.get("proxy_password") or "",
+                settings=config,
+                data_dir=WEB_DATA_DIR,
+                scheme=scheme,
+                probe_missing=probe_missing,
+            )
+            scanned += int(report.get("scanned") or 0)
+            accepted += int(report.get("accepted") or 0)
+            rejected += int(report.get("rejected") or 0)
+            skipped += int(report.get("skipped_unprobed") or 0)
+            if not hosts:
+                continue
+            next_item = dict(item)
+            next_item["slots"] = hosts
+            filtered.append(next_item)
+        entries = filtered
+        quality_report = {
+            "enabled": True,
+            "scanned": scanned,
+            "accepted": accepted,
+            "rejected": rejected,
+            "skipped_unprobed": skipped,
+            "max_latency_ms": qcfg["max_latency_ms"],
+            "exclude_countries": qcfg["exclude_countries"],
+            "arp_check_enabled": qcfg["arp_check_enabled"],
+            "probe_missing": bool(probe_missing),
+            "profile_id": config.get("quality_profile_id") or "default",
+        }
     cap = pool.capacity(entries, settings)
     cap["accounts"] = [
         {"email": item["email"], "slots": len(item["slots"])}
         for item in entries
     ]
+    cap["quality"] = quality_report
     return settings, entries, cap
 
 
-def _live_proxy_body():
-    _settings, entries, _cap = _pool_snapshot()
-    lines = pool.format_proxy_lines(entries, worker._format_proxy_url)
+def _live_proxy_body(protocol=None):
+    _settings, entries, _cap = _pool_snapshot(probe_missing=True)
+    scheme = _resolve_export_protocol(protocol)
+    lines = pool.format_proxy_lines(entries, worker._format_proxy_url, protocol=scheme)
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _fetch_upstream_pull_proxies(config=None, limit=None):
+    cfg = config if isinstance(config, dict) else _read_config()
+    settings = _public_settings(cfg)
+    base = settings["pull_api_base"]
+    user = settings["pull_api_user"]
+    password = settings["pull_api_pass"]
+    shuliang = settings["pull_api_shuliang"]
+    api_id = settings["pull_api_id"]
+    if not base or not user:
+        raise RuntimeError("未配置拉代理 API（pull_api_base / pull_api_user）")
+    count = int(limit) if limit else shuliang
+    count = max(1, min(10000, count))
+
+    # Avoid recursive HTTP to this same Nodes /api (8892 historically proxies here).
+    base_l = base.lower()
+    if _is_local_shortcircuit_base(base_l):
+        lines = [proxy_quality.normalize_proxy_url(item) for item in _live_proxy_body().splitlines()]
+        lines = [item for item in lines if item]
+        start = max(0, (int(api_id) - 1) * count)
+        page = lines[start:start + count]
+        return page, f"{base}?user={user}&pass=***&shuliang={count}&id={api_id} (local-pool)"
+
+    query = urlencode({
+        "user": user,
+        "pass": password,
+        "shuliang": count,
+        "id": api_id,
+    })
+    # Plain text list URLs (e.g. proxy-checker repo) keep optional query but work either way.
+    if "?" in base:
+        url = f"{base}&{query}"
+    else:
+        url = f"{base}?{query}"
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    lines = []
+    seen = set()
+    for raw in response.text.splitlines():
+        proxy = proxy_quality.normalize_proxy_url(raw)
+        if not proxy or proxy in seen:
+            continue
+        seen.add(proxy)
+        lines.append(proxy)
+    if limit is not None:
+        lines = lines[:count]
+    return lines, url
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"status": "ok", "service": "nodes-dashboard"})
+
+
+@app.get("/api")
+def provider_compat_api():
+    """Compatibility endpoint for the external proxy-pool URL contract (port 8892)."""
+    settings = _public_settings(_read_config())
+    expected_user = settings["pull_api_user"] or "lichao"
+    expected_pass = settings["pull_api_pass"] or ""
+    api_user = str(request.args.get("user") or "").strip()
+    api_pass = str(request.args.get("pass") or "").strip()
+    if not expected_pass or not _token_matches(api_user, expected_user) or not _token_matches(api_pass, expected_pass):
+        return jsonify({"error": "invalid_credentials"}), 401
+    try:
+        quantity = max(1, min(1000, int(request.args.get("shuliang", settings["pull_api_shuliang"] or 100))))
+        provider_id = max(1, int(request.args.get("id", settings["pull_api_id"] or 1)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_shuliang_or_id"}), 400
+    try:
+        protocol = _resolve_export_protocol(
+            request.args.get("scheme") or request.args.get("protocol"),
+        )
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    lines = _live_proxy_body(protocol=protocol).splitlines()
+    if not lines:
+        return jsonify({"error": "proxy_pool_empty", "id": provider_id}), 503
+    start = (provider_id - 1) * quantity
+    page = lines[start:start + quantity]
+    body = "\n".join(page) + "\n"
+    return Response(body, mimetype="text/plain; charset=utf-8")
+
+
+def _qualified_pull_body(protocol=None, limit=None, rule_id=None):
+    raw = _read_config()
+    config = _config_for_quality(raw, rule_id=rule_id)
+    scheme = _resolve_export_protocol(protocol)
+    upstream, upstream_url = _fetch_upstream_pull_proxies(raw, limit=limit)
+    accepted, report = proxy_quality.filter_proxies(
+        upstream, settings=config, data_dir=WEB_DATA_DIR,
+    )
+    rewritten = [proxy_quality.rewrite_scheme(item, scheme) for item in accepted]
+    body = "\n".join(rewritten) + ("\n" if rewritten else "")
+    return body, {
+        "upstream_url_masked": re.sub(r"(pass=)[^&]+", r"\1***", upstream_url),
+        "upstream_count": len(upstream),
+        "quality": report,
+        "scheme": scheme,
+        "rule_id": config.get("quality_profile_id") or "default",
+    }
 
 
 def _public_base():
@@ -470,12 +1161,23 @@ def _public_base():
 def _subscription_urls():
     token = _export_token()
     public_base = _public_base()
-    internal = f"http://127.0.0.1:8891/nodes/api/export/live-proxies?token={token}"
-    public = f"{public_base}/api/export/live-proxies?token={token}"
-    gpt_public = f"{public_base}/api/export/gpt-gateway?token={token}"
-    gpt_internal = f"http://127.0.0.1:8891/nodes/api/export/gpt-gateway?token={token}"
-    clash_public = f"{public_base}/api/export/clash.yml?token={token}"
-    ladder_public = f"{public_base}/api/export/ladder?token={token}"
+    protocol = _export_protocol_from_config()
+    protocol_q = f"&protocol={protocol}" if protocol != "http" else ""
+    internal = f"http://127.0.0.1:8891/nodes/api/export/live-proxies?token={token}{protocol_q}"
+    public = f"{public_base}/api/export/live-proxies?token={token}{protocol_q}"
+    gpt_public = f"{public_base}/api/export/gpt-gateway?token={token}{protocol_q}"
+    gpt_internal = f"http://127.0.0.1:8891/nodes/api/export/gpt-gateway?token={token}{protocol_q}"
+    clash_public = f"{public_base}/api/export/clash.yml?token={token}{protocol_q}"
+    ladder_public = f"{public_base}/api/export/ladder?token={token}{protocol_q}"
+    shuliang = _public_settings(_read_config()).get("pull_api_shuliang", 100)
+    export_rule = _public_settings(_read_config()).get("export_quality_profile") or "default"
+    qualified_q = urlencode({
+        "token": token,
+        "scheme": protocol,
+        "shuliang": shuliang,
+        "rule": export_rule,
+    })
+    qualified_public = f"{public_base}/api/export/qualified-proxies?{qualified_q}" if public_base and token else ""
     return {
         "resin_internal": internal,
         "resin_public": public,
@@ -483,25 +1185,66 @@ def _subscription_urls():
         "gpt_public": gpt_public,
         "clash_public": clash_public,
         "ladder_public": ladder_public,
+        "qualified_public": qualified_public,
+        "export_proxy_protocol": protocol,
+        "export_quality_profile": export_rule,
     }
 
 
-def _gpt_gateway_body(settings, live_slots):
+def _detect_outbound_ipv4():
+    """Best-effort primary IPv4 used for outbound traffic (non-loopback)."""
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            ip = str(sock.getsockname()[0] or "").strip()
+        finally:
+            sock.close()
+        if ip and not pool.is_loopback_host(ip):
+            return ip
+    except Exception:
+        pass
+    return ""
+
+
+def _gateway_export_host(settings=None, config=None):
+    """Reachable host for Resin/GPT/Clash/ladder subscription lines."""
+    cfg = config if isinstance(config, dict) else _read_config()
+    pool_cfg = settings if isinstance(settings, dict) else pool.pool_settings(cfg)
+    configured = str(pool_cfg.get("gateway_host") or pool.DEFAULT_GATEWAY_HOST).strip() or pool.DEFAULT_GATEWAY_HOST
+    public = (
+        str(cfg.get("resin_gateway_public_host") or "").strip()
+        or str(os.environ.get("NODES_GATEWAY_PUBLIC_HOST") or "").strip()
+    )
+    host = pool.advertise_gateway_host(configured, public)
+    if not pool.is_loopback_host(host):
+        return host
+    detected = _detect_outbound_ipv4()
+    if detected:
+        return detected
+    return host
+
+
+def _gpt_gateway_body(settings, live_slots, protocol=None):
     token, auth_version = pool.resin_auth(_read_config())
     if not token:
         return ""
+    scheme = _resolve_export_protocol(protocol)
     return "\n".join(pool.gpt_gateway_lines(
         int(live_slots),
         token,
-        settings["gateway_host"],
+        _gateway_export_host(settings),
         settings["gateway_port"],
         auth_version,
         settings["gateway_platform"],
+        protocol=scheme,
     )) + "\n"
 
 
 def _maybe_fill_capacity(auto_register=True):
-    settings, _entries, cap = _pool_snapshot()
+    # Probe so shortage is based on quality-admitted slots, not raw hosts.
+    settings, _entries, cap = _pool_snapshot(probe_missing=True)
     started = None
     if auto_register and settings["auto_register"] and cap["needed_accounts"] > 0 and not TASK_STORE.active():
         count = min(int(settings["max_register_per_round"]), int(cap["needed_accounts"]))
@@ -529,6 +1272,9 @@ def _start_pool_loop():
             try:
                 settings = pool.pool_settings(_read_config())
                 time.sleep(int(settings["loop_seconds"]))
+                pruned = _prune_expired_accounts()
+                if pruned:
+                    print(f"[pool] auto-removed {len(pruned)} expired account(s)")
                 _maybe_fill_capacity(auto_register=True)
             except Exception:
                 time.sleep(30)
@@ -539,9 +1285,21 @@ def _start_pool_loop():
 @app.before_request
 def protect_routes():
     _start_pool_loop()
-    if request.endpoint in {"login", "health", "static", "live_proxies", "gpt_gateway", "clash_export", "ladder_export"}:
+    if request.endpoint in {
+        "login",
+        "health",
+        "static",
+        "live_proxies",
+        "gpt_gateway",
+        "clash_export",
+        "ladder_export",
+        "qualified_proxies",
+        "provider_compat_api",
+    }:
         return None
-    if "/api/export/clash" in str(request.path or ""):
+    if "/api/export/clash" in str(request.path or "") or "/api/v1/exports/clash" in str(request.path or ""):
+        return None
+    if "/api/v1/exports/" in str(request.path or ""):
         return None
     if request.endpoint == "ensure_capacity" and _request_has_export_token():
         return None
@@ -607,55 +1365,110 @@ def index():
     )
 
 
-@app.get("/api/health")
-def health():
-    return jsonify({"status": "ok", "service": "nodes-dashboard"})
-
 
 @app.get("/api/export/live-proxies")
+@app.get("/api/v1/exports/live-proxies")
 def live_proxies():
     if not _request_has_export_token():
         return jsonify({"error": "unauthorized"}), 401
-    body = _live_proxy_body()
+    try:
+        protocol = _resolve_export_protocol(request.args.get("protocol") or request.args.get("scheme"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    body = _live_proxy_body(protocol=protocol)
     return Response(body, mimetype="text/plain; charset=utf-8")
+
+
+@app.get("/api/export/qualified-proxies")
+@app.get("/api/v1/exports/qualified-proxies")
+def qualified_proxies():
+    """Pull upstream 8892 API → quality gate → return only admitted proxies.
+
+    Query:
+      token (required), scheme/protocol (http|socks5h), shuliang/limit (optional),
+      rule/profile (optional quality profile id)
+    """
+    if not _request_has_export_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        protocol = _resolve_export_protocol(
+            request.args.get("protocol") or request.args.get("scheme"),
+        )
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    limit_raw = request.args.get("shuliang") or request.args.get("limit") or ""
+    limit = None
+    if str(limit_raw).strip():
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "shuliang/limit 必须是整数"}), 400
+    rule_id = request.args.get("rule") or request.args.get("profile") or None
+    try:
+        body, meta = _qualified_pull_body(protocol=protocol, limit=limit, rule_id=rule_id)
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 409
+    except Exception as error:
+        return jsonify({"error": _safe_error(error)}), 502
+    if request.args.get("meta") in {"1", "true", "yes"}:
+        return jsonify({"ok": True, "body": body, **meta})
+    response = Response(body, mimetype="text/plain; charset=utf-8")
+    response.headers["X-Proxy-Quality-Accepted"] = str(meta.get("quality", {}).get("accepted") or 0)
+    response.headers["X-Proxy-Quality-Rejected"] = str(meta.get("quality", {}).get("rejected") or 0)
+    response.headers["X-Proxy-Upstream-Count"] = str(meta.get("upstream_count") or 0)
+    response.headers["X-Proxy-Quality-Rule"] = str(meta.get("rule_id") or "")
+    return response
 
 
 @app.get("/api/export/gpt-gateway")
+@app.get("/api/v1/exports/gpt-gateway")
 def gpt_gateway():
     if not _request_has_export_token():
         return jsonify({"error": "unauthorized"}), 401
-    settings, _entries, cap = _pool_snapshot()
-    body = _gpt_gateway_body(settings, cap["live_slots"])
+    try:
+        protocol = _resolve_export_protocol(request.args.get("protocol") or request.args.get("scheme"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    # Cache-based quality snapshot is enough for gateway slot count; avoid blocking probes.
+    settings, _entries, cap = _pool_snapshot(probe_missing=False)
+    body = _gpt_gateway_body(settings, cap["live_slots"], protocol=protocol)
     if not body.strip():
-        return jsonify({"error": "resin_proxy_token_missing"}), 503
+        # Ship direct live lines when Resin token/slots unavailable but pool has proxies.
+        body = _live_proxy_body(protocol=protocol)
+        if not body.strip():
+            return jsonify({"error": "no_proxies_available"}), 503
     return Response(body, mimetype="text/plain; charset=utf-8")
 
 
-def _clash_body(settings, live_slots):
+def _clash_body(settings, live_slots, protocol=None):
     token, auth_version = pool.resin_auth(_read_config())
     if not token:
         return ""
+    scheme = _resolve_export_protocol(protocol)
     return pool.clash_yaml(
         int(live_slots),
         token,
-        settings["gateway_host"],
+        _gateway_export_host(settings),
         settings["gateway_port"],
         auth_version,
         settings["gateway_platform"],
+        protocol=scheme,
     )
 
 
-def _ladder_body(settings, live_slots):
+def _ladder_body(settings, live_slots, protocol=None):
     token, auth_version = pool.resin_auth(_read_config())
     if not token:
         return ""
+    scheme = _resolve_export_protocol(protocol)
     return pool.ladder_base64(
         int(live_slots),
         token,
-        settings["gateway_host"],
+        _gateway_export_host(settings),
         settings["gateway_port"],
         auth_version,
         settings["gateway_platform"],
+        protocol=scheme,
     )
 
 
@@ -663,11 +1476,19 @@ def _ladder_body(settings, live_slots):
 @app.get("/api/export/clash")
 @app.get("/api/export/clash.yml/<export_token>")
 @app.get("/api/export/clash/<export_token>")
+@app.get("/api/v1/exports/clash.yml")
+@app.get("/api/v1/exports/clash")
+@app.get("/api/v1/exports/clash.yml/<export_token>")
+@app.get("/api/v1/exports/clash/<export_token>")
 def clash_export(export_token=None):
     if not _can_export_clash():
         return jsonify({"error": "unauthorized"}), 401
-    settings, _entries, cap = _pool_snapshot()
-    body = _clash_body(settings, cap["live_slots"])
+    try:
+        protocol = _resolve_export_protocol(request.args.get("protocol") or request.args.get("scheme"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    settings, _entries, cap = _pool_snapshot(probe_missing=True)
+    body = _clash_body(settings, cap["live_slots"], protocol=protocol)
     if not body.strip():
         return jsonify({"error": "resin_proxy_token_missing"}), 503
     response = Response(body, mimetype="text/yaml; charset=utf-8")
@@ -680,11 +1501,16 @@ def clash_export(export_token=None):
 
 
 @app.get("/api/export/ladder")
+@app.get("/api/v1/exports/ladder")
 def ladder_export():
     if not _request_has_export_token():
         return jsonify({"error": "unauthorized"}), 401
-    settings, _entries, cap = _pool_snapshot()
-    body = _ladder_body(settings, cap["live_slots"])
+    try:
+        protocol = _resolve_export_protocol(request.args.get("protocol") or request.args.get("scheme"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    settings, _entries, cap = _pool_snapshot(probe_missing=True)
+    body = _ladder_body(settings, cap["live_slots"], protocol=protocol)
     if not body.strip():
         return jsonify({"error": "resin_proxy_token_missing"}), 503
     return Response(body, mimetype="text/plain; charset=utf-8")
@@ -699,6 +1525,11 @@ def pool_status():
 def ensure_capacity():
     payload = request.get_json(silent=True) or {}
     auto_register = True if "auto_register" not in payload else bool(payload.get("auto_register"))
+    # Re-probe pool slots so capacity/export only keep ARP/latency/country passers.
+    try:
+        _pool_snapshot(probe_missing=True)
+    except Exception:
+        pass
     try:
         cap, started = _maybe_fill_capacity(auto_register=auto_register)
     except RuntimeError as error:
@@ -708,6 +1539,7 @@ def ensure_capacity():
         "pool": _pool_public(),
         "capacity": cap,
         "task": started,
+        "inventory": _quality_inventory(persist=True),
     })
 
 
@@ -829,17 +1661,19 @@ def _account_api_urls(record):
     token = str(api_key.get("token") or record.get("api_token") or "").strip()
     user = str(record.get("proxy_username") or "").strip()
     password = str(record.get("proxy_password") or "").strip()
+    protocol = _export_protocol_from_config()
+    api_protocol = worker.proxyscrape_protocol_param(protocol)
     public_list = ""
     dashboard_list = ""
     dashboard_overview = ""
     if account_id:
         public_list = (
             f"{worker.PS_PUBLIC_API}/v4/account/{account_id}/datacenter_shared/proxy-list"
-            "?protocol=http&format=credentials&credential_format=3"
+            f"?protocol={api_protocol}&format=credentials&credential_format=3"
         )
         dashboard_list = (
             f"{worker.PS_BASE}/v2/v4/account/{account_id}/datacenter_shared/proxy-list"
-            "?protocol=http&format=normal"
+            f"?protocol={api_protocol}&format=normal"
         )
         dashboard_overview = f"{worker.PS_BASE}/v2/v4/account/{account_id}/services/overview"
     return {
@@ -850,7 +1684,8 @@ def _account_api_urls(record):
         "api_token_header": "api-token",
         "dashboard_auth_header": "Authorization: Bearer <access_token>",
         "proxy_credential": f"{user}:{password}" if user and password else "",
-        "proxy_url_template": f"http://{user}:{password}@HOST:PORT" if user and password else "",
+        "proxy_protocol": protocol,
+        "proxy_url_template": f"{protocol}://{user}:{password}@HOST:PORT" if user and password else "",
         "curl_public_proxy_list": (
             f"curl -H \"api-token: {token}\" \"{public_list}\"" if token and public_list else ""
         ),
@@ -955,17 +1790,18 @@ def _pool_public():
     settings, _entries, cap = _pool_snapshot()
     urls = _subscription_urls()
     resin_token, auth_version = pool.resin_auth(_read_config())
+    export_host = _gateway_export_host(settings)
     if resin_token:
         user, password = pool.gateway_identity(
             1, auth_version, settings["gateway_platform"], resin_token,
         )
         gateway_sample = (
-            f"http://{user}:{password}@{settings['gateway_host']}:{settings['gateway_port']}"
+            f"http://{user}:{password}@{export_host}:{settings['gateway_port']}"
         )
     else:
         gateway_sample = (
             f"http://{settings['gateway_platform']}.n01:<RESIN_PROXY_TOKEN>"
-            f"@{settings['gateway_host']}:{settings['gateway_port']}"
+            f"@{export_host}:{settings['gateway_port']}"
         )
     return {
         **cap,
@@ -974,8 +1810,11 @@ def _pool_public():
         "gpt_subscription_url": urls["gpt_public"],
         "clash_subscription_url": urls["clash_public"],
         "ladder_subscription_url": urls["ladder_public"],
+        "qualified_subscription_url": urls["qualified_public"],
+        "qualified_url": urls["qualified_public"],
+        "export_proxy_protocol": urls["export_proxy_protocol"],
         "gpt_gateway_sample": gateway_sample,
-        "gpt_gateway_host": f"{settings['gateway_host']}:{settings['gateway_port']}",
+        "gpt_gateway_host": f"{export_host}:{settings['gateway_port']}",
         "auth_version": auth_version,
         "has_resin_token": bool(resin_token),
     }
@@ -1018,6 +1857,33 @@ def _delete_accounts(emails):
     deleted.update(item.lower() for item in removed)
     _save_deleted_emails(deleted)
     return removed
+
+
+def _account_expiry_unix(record):
+    usage = _usage_fields(record)
+    expiry = usage.get("expiry")
+    try:
+        return int(expiry) if expiry else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _prune_expired_accounts(now=None):
+    """Keep only valid accounts: auto-delete rows whose plan/token expiry has passed."""
+    stamp = int(now if now is not None else time.time())
+    expired_emails = []
+    for record in _account_records():
+        expiry = _account_expiry_unix(record)
+        if expiry and expiry <= stamp:
+            email = str(record.get("email") or "").strip()
+            if email:
+                expired_emails.append(email)
+    if not expired_emails:
+        return []
+    try:
+        return _delete_accounts(expired_emails)
+    except ValueError:
+        return []
 
 
 def _parse_account_text(text):
@@ -1185,7 +2051,9 @@ def _refresh_account_remote(record, create_key=False, permissions=None):
         next_record["plan_status"] = summary.get("status")
     next_record["usage_synced_at"] = int(time.time())
     try:
-        plist = worker.list_proxy_hosts(access_token, account_id)
+        plist = worker.list_proxy_hosts(
+            access_token, account_id, protocol=_export_protocol_from_config(),
+        )
         if plist:
             next_record["proxy_ips"] = plist
             next_record["proxy_count"] = len(plist)
@@ -1207,18 +2075,77 @@ def _refresh_account_remote(record, create_key=False, permissions=None):
     return next_record
 
 
+def _quality_inventory(config=None, persist=False):
+    """Summarize quality cache + last pool quality report for dashboard."""
+    raw = config if isinstance(config, dict) else _read_config()
+    cfg = _config_for_quality(raw)
+    qcfg = proxy_quality.quality_settings(cfg)
+    cache = proxy_quality.load_cache(WEB_DATA_DIR)
+    accepted = rejected = 0
+    reasons = {}
+    for item in (cache or {}).values():
+        if not isinstance(item, dict):
+            continue
+        if item.get("ok"):
+            accepted += 1
+            continue
+        rejected += 1
+        reason = str(item.get("reason") or "unknown").strip() or "unknown"
+        reasons[reason] = reasons.get(reason, 0) + 1
+    try:
+        _settings, _entries, cap = _pool_snapshot(probe_missing=False)
+        pool_q = cap.get("quality") if isinstance(cap, dict) else {}
+    except Exception:
+        pool_q = {}
+    if isinstance(pool_q, dict) and pool_q.get("enabled") and int(pool_q.get("scanned") or 0) > 0:
+        scanned = int(pool_q.get("scanned") or 0)
+        pool_accepted = int(pool_q.get("accepted") or 0)
+        pool_rejected = int(pool_q.get("rejected") or 0)
+    else:
+        scanned = accepted + rejected
+        pool_accepted = accepted
+        pool_rejected = rejected
+    ranked = sorted(reasons.items(), key=lambda pair: (-pair[1], pair[0]))[:12]
+    public = _public_settings(raw)
+    inventory = {
+        "enabled": bool(qcfg["enabled"]),
+        "scanned": scanned,
+        "accepted": pool_accepted,
+        "rejected": pool_rejected,
+        "cache_accepted": accepted,
+        "cache_rejected": rejected,
+        "reasons": [{"reason": reason, "count": count} for reason, count in ranked],
+        "reject_reasons": {reason: count for reason, count in ranked},
+        "source": "pool+cache",
+        "max_latency_ms": int(qcfg["max_latency_ms"]),
+        "exclude_countries": list(qcfg["exclude_countries"]),
+        "arp_check_enabled": bool(qcfg["arp_check_enabled"]),
+        "version": int(public.get("proxy_quality_version") or 0),
+        "updated_at": public.get("proxy_quality_updated_at") or "",
+        "profile_id": public.get("quality_profile_id") or "default",
+        "export_profile_id": public.get("export_quality_profile") or "default",
+    }
+    if persist:
+        platform_store.save_inventory_snapshot(WEB_DATA_DIR, inventory)
+    return inventory
+
+
 @app.get("/api/dashboard")
 def dashboard():
     records = _account_records()
     files = _proxy_files()
     active = TASK_STORE.active()
     config = _read_config()
+    inventory = _quality_inventory(config, persist=True)
+    history = platform_store.load_inventory_history(WEB_DATA_DIR, limit=24)
     return jsonify({
         "summary": {
             "accounts": len(records),
             "verified": sum(1 for item in records if item.get("verified")),
             "proxies": sum(item["count"] for item in files),
             "successful_accounts": sum(1 for item in records if int(item.get("proxy_count") or 0) > 0),
+            "qualified": inventory.get("accepted"),
+            "rejected": inventory.get("rejected"),
         },
         "chain": {
             "captcha": str(config.get("captcha_provider") or worker.CAPTCHA_PROVIDER),
@@ -1229,12 +2156,28 @@ def dashboard():
         "active_task": active.get("id") if active else None,
         "tasks": TASK_STORE.list(8),
         "pool": _pool_public(),
+        "pull_api": _pull_api_public(config),
+        "inventory": inventory,
+        "inventory_history": history,
+        "quality_profiles": _profiles_public(config),
+        "quality_meta": {
+            "version": inventory.get("version"),
+            "updated_at": inventory.get("updated_at"),
+            "proxy_quality_version": inventory.get("version"),
+            "proxy_quality_updated_at": inventory.get("updated_at"),
+            "profile_id": inventory.get("profile_id"),
+            "export_profile_id": inventory.get("export_profile_id"),
+        },
     })
 
 
 @app.get("/api/accounts")
 def accounts():
-    return jsonify({"accounts": _public_accounts(_account_records())[:500]})
+    pruned = _prune_expired_accounts()
+    return jsonify({
+        "accounts": _public_accounts(_account_records())[:500],
+        "pruned_expired": pruned,
+    })
 
 
 @app.get("/api/permission-catalog")
@@ -1298,10 +2241,12 @@ def sync_accounts_usage():
             synced.append(email)
         except Exception as error:
             failed.append({"email": email, "error": _safe_error(error)})
+    pruned = _prune_expired_accounts()
     return jsonify({
         "ok": True,
         "synced": synced,
         "failed": failed,
+        "pruned_expired": pruned,
         "accounts": _public_accounts(_account_records())[:500],
     })
 
@@ -1421,7 +2366,34 @@ def task_detail(task_id):
 
 @app.get("/api/settings")
 def get_settings():
-    return jsonify({"settings": _public_settings(_read_config())})
+    config = _read_config()
+    group = str(request.args.get("group") or "").strip().lower()
+    public = _public_settings(config)
+    if group:
+        try:
+            settings = _settings_for_group(config, group)
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        payload = {
+            "group": group,
+            "settings": settings,
+            "groups": list(SETTINGS_GROUPS.keys()),
+        }
+        if group == "sources":
+            payload["pull_api"] = _pull_api_public(config)
+        if group == "quality":
+            payload["quality_meta"] = {
+                "proxy_quality_version": public.get("proxy_quality_version"),
+                "proxy_quality_updated_at": public.get("proxy_quality_updated_at"),
+            }
+            payload["quality_profiles"] = _profiles_public(config)
+        return jsonify(payload)
+    return jsonify({
+        "settings": public,
+        "groups": {name: list(keys) for name, keys in SETTINGS_GROUPS.items()},
+        "pull_api": _pull_api_public(config),
+        "quality_profiles": _profiles_public(config),
+    })
 
 
 @app.put("/api/settings")
@@ -1433,7 +2405,143 @@ def put_settings():
         return jsonify({"error": str(error)}), 400
     except RuntimeError as error:
         return jsonify({"error": str(error)}), 409
-    return jsonify({"ok": True, "settings": settings})
+    group = str(payload.get("group") or "").strip().lower()
+    response = {"ok": True, "settings": settings, "groups": list(SETTINGS_GROUPS.keys())}
+    if group:
+        response["group"] = group
+        response["all_settings"] = settings
+        response["settings"] = settings
+    response["pull_api"] = _pull_api_public()
+    response["quality_profiles"] = _profiles_public(_read_config())
+    if group == "quality" or (set(payload) & set(QUALITY_FLAT_KEYS)):
+        _quality_inventory(persist=True)
+    return jsonify(response)
+
+
+@app.post("/api/quality/dry-run")
+def quality_dry_run():
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text") or payload.get("proxies") or ""
+    if isinstance(text, list):
+        lines = [str(item).strip() for item in text if str(item).strip()]
+    else:
+        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    try:
+        limit = int(payload.get("limit") or 50)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit 必须是整数"}), 400
+    limit = max(1, min(50, limit))
+    lines = lines[:limit]
+    if not lines:
+        return jsonify({"error": "请粘贴至少一条代理"}), 400
+    rule_id = payload.get("rule") or payload.get("profile") or payload.get("quality_profile_id")
+    config = _config_for_quality(_read_config(), rule_id=rule_id)
+    accepted, report = proxy_quality.filter_proxies(
+        lines, settings=config, data_dir=WEB_DATA_DIR, use_cache=False, probe_missing=True,
+    )
+    return jsonify({
+        "ok": True,
+        "accepted": accepted,
+        "report": report,
+        "rule_id": config.get("quality_profile_id") or "default",
+        "quality_meta": {
+            "proxy_quality_version": _public_settings(_read_config()).get("proxy_quality_version"),
+            "proxy_quality_updated_at": _public_settings(_read_config()).get("proxy_quality_updated_at"),
+        },
+    })
+
+
+@app.get("/api/quality/profiles")
+def quality_profiles_list():
+    return jsonify({"ok": True, **_profiles_public(_read_config())})
+
+
+@app.post("/api/quality/profiles/activate")
+def quality_profiles_activate():
+    payload = request.get_json(silent=True) or {}
+    profile_id = _profile_id_clean(payload.get("id") or payload.get("profile_id"), "")
+    if not profile_id:
+        return jsonify({"error": "缺少 profile id"}), 400
+    try:
+        settings = _apply_settings({"group": "quality", "quality_profile_id": profile_id})
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 409
+    return jsonify({"ok": True, "settings": settings, "quality_profiles": _profiles_public(_read_config())})
+
+
+@app.put("/api/quality/profiles/<profile_id>")
+def quality_profiles_upsert(profile_id):
+    payload = request.get_json(silent=True) or {}
+    pid = _profile_id_clean(profile_id, "")
+    if not pid:
+        return jsonify({"error": "无效 profile id"}), 400
+    body = {"group": "quality", "quality_profile_id": pid}
+    for key in QUALITY_FLAT_KEYS:
+        if key in payload:
+            body[key] = payload[key]
+    if "name" in payload:
+        # name stored via apply through fields dict — pass into apply by writing after
+        pass
+    if not (set(body) & set(QUALITY_FLAT_KEYS)):
+        # activate / rename only
+        current = _read_config()
+        profiles, _ = _ensure_quality_profiles(current)
+        if pid not in profiles and pid not in BUILTIN_QUALITY_PROFILES:
+            # create from default flat keys
+            for key in QUALITY_FLAT_KEYS:
+                body[key] = _public_settings(current).get(key)
+        else:
+            body["quality_profile_id"] = pid
+    try:
+        if TASK_STORE.active():
+            raise RuntimeError("有注册任务正在运行，请结束后再改配置")
+        if set(body) & set(QUALITY_FLAT_KEYS):
+            settings = _apply_settings(body)
+        else:
+            settings = _apply_settings({"group": "quality", "quality_profile_id": pid})
+        if "name" in payload:
+            cfg = _read_config()
+            profiles, _ = _ensure_quality_profiles(cfg)
+            if pid in profiles:
+                profiles[pid]["name"] = str(payload.get("name") or pid)
+                cfg["quality_profiles"] = profiles
+                _atomic_json(CONFIG_FILE, cfg)
+                settings = _public_settings(cfg)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 409
+    return jsonify({"ok": True, "settings": settings, "quality_profiles": _profiles_public(_read_config())})
+
+
+@app.get("/api/inventory")
+def inventory_status():
+    inv = _quality_inventory(_read_config(), persist=False)
+    latest = platform_store.load_inventory_latest(WEB_DATA_DIR) or inv
+    return jsonify({"ok": True, "inventory": inv, "latest": latest})
+
+
+@app.get("/api/inventory/history")
+def inventory_history():
+    limit = request.args.get("limit") or 48
+    rows = platform_store.load_inventory_history(WEB_DATA_DIR, limit=limit)
+    return jsonify({"ok": True, "history": rows})
+
+
+@app.post("/api/inventory/snapshot")
+def inventory_snapshot():
+    inv = _quality_inventory(_read_config(), persist=True)
+    return jsonify({"ok": True, "inventory": inv, "history": platform_store.load_inventory_history(WEB_DATA_DIR, limit=24)})
+
+
+@app.get("/api/audit")
+def audit_list():
+    kind = request.args.get("kind") or ""
+    limit = request.args.get("limit") or 50
+    rows = platform_store.load_audit(WEB_DATA_DIR, kind=kind or None, limit=limit)
+    return jsonify({"ok": True, "entries": rows})
 
 
 @app.get("/download/<kind>/<path:filename>")

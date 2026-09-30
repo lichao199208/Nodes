@@ -25,7 +25,7 @@ ProxyScrape 前端已将该步骤改为 onboarding 中的显式“领取免费�
 | E-02 | 部署的注册脚本 | `sha256sum /opt/nodes/current/proxyscrape_register.py` | `94408f4d75346a84c648a7a182bbd246f43f5ff79e51572a2f1d7eb1306d29e6` |
 | E-03 | Docker image | `docker image inspect nodes:1216835-yunxin3-onboarding` | n/a（本地镜像标签，实时 digest 由复现命令返回） |
 | E-04 | 端到端输出 | `wc -l /opt/nodes/data/node/proxies_20260917_131641.txt` | n/a（含敏感代理凭据） |
-| E-05 | 邮件服务安全 HTML 修复 | mail service source | n/a |
+| E-05 | 邮件服务安全 HTML 修复 | `sha256sum /opt/yunxin-mail/index.js` | `ba296617b6f163e988642767f79ef34184b69bc1cbd50b74311a529b85efbe15` |
 
 ## 4. Findings
 

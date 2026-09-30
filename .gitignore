@@ -27,3 +27,12 @@ screenshots/
 .playwright-mcp/
 .wrangler/
 _diag_widget.py
+# Desensitized publish extras
+*.pem
+*.key
+id_rsa*
+.env.*
+!.env.example
+nodes-web-credentials.txt
+nodes-cfg-*
+data/

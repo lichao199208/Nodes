@@ -11,7 +11,7 @@ class TwoCaptchaSolverTests(unittest.TestCase):
     def setUp(self):
         self.original_key = target.CAPTCHA_API_KEY
         self.original_interval = target.CAPTCHA_POLL_INTERVAL
-        target.CAPTCHA_API_KEY = "test-key"
+        target.CAPTCHA_API_KEY = "YOUR_SECRET_HERE"
         target.CAPTCHA_POLL_INTERVAL = 5
 
     def tearDown(self):

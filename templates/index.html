@@ -6,22 +6,22 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   <meta name="app-base" content="{{ app_base }}">
   <title>Nodes Ops</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v=pool11">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v=ia2">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <div class="brand-mark">N</div>
-        <div><strong>Nodes Ops</strong><span>注册运营控制台</span></div>
+        <div><strong>Nodes Ops</strong><span>代理 IP 管理平台</span></div>
       </div>
       <nav class="nav" aria-label="主导航">
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon">仪</span><span>仪表盘</span></button>
-        <button class="nav-item" data-view="accounts"><span class="nav-icon">账</span><span>账号管理</span></button>
-        <button class="nav-item" data-view="mail"><span class="nav-icon">邮</span><span>邮箱服务</span></button>
-        <button class="nav-item" data-view="captcha"><span class="nav-icon">码</span><span>打码接口</span></button>
-        <button class="nav-item" data-view="proxies"><span class="nav-icon">代</span><span>代理输出</span></button>
-        <button class="nav-item" data-view="tasks"><span class="nav-icon">志</span><span>任务日志</span></button>
+        <button class="nav-item" data-view="sources"><span class="nav-icon">源</span><span>代理源</span></button>
+        <button class="nav-item" data-view="quality"><span class="nav-icon">检</span><span>质检规则</span></button>
+        <button class="nav-item" data-view="exports"><span class="nav-icon">出</span><span>出口订阅</span></button>
+        <button class="nav-item" data-view="accounts"><span class="nav-icon">账</span><span>账号</span></button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon">设</span><span>设置</span></button>
       </nav>
       <div class="sidebar-footer">
         <div class="user-row"><span class="user-avatar">{{ username[:1]|upper }}</span><span>{{ username }}</span></div>
@@ -32,23 +32,292 @@
     <div class="page">
       <header class="topbar">
         <button class="menu-button" id="menuButton" aria-label="打开导航">☰</button>
-        <div><h1 id="pageTitle">仪表盘</h1><p id="pageSubtitle">注册任务与资源状态</p></div>
+        <div><h1 id="pageTitle">仪表盘</h1><p id="pageSubtitle">库存与质检拉取</p></div>
         <div class="activity" id="activity"><span class="activity-dot"></span><span>无活动任务</span></div>
       </header>
 
       <main class="main-content">
+        <!-- 仪表盘 -->
         <section class="view active" id="view-dashboard">
           <div class="metric-grid">
-            <article class="metric"><span>账号总数</span><strong id="metricAccounts">—</strong><small id="metricAccountsNote">正在汇总</small></article>
-            <article class="metric"><span>已验证账号</span><strong id="metricVerified">—</strong><small id="metricVerifiedNote">邮箱校验状态</small></article>
-            <article class="metric"><span>代理节点</span><strong id="metricProxies">—</strong><small id="metricProxiesNote">已导出文件汇总</small></article>
-            <article class="metric"><span>自动化链路</span><strong class="metric-status" id="metricChain">检查中</strong><small>Turnstile · Mail · Trial</small></article>
+            <article class="metric"><span>有效账号</span><strong id="metricAccounts">—</strong><small id="metricAccountsNote">账号池</small></article>
+            <article class="metric"><span>合格代理</span><strong id="metricQualified">—</strong><small id="metricQualifiedNote">质检通过</small></article>
+            <article class="metric"><span>拒绝</span><strong id="metricRejected">—</strong><small id="metricRejectedNote">质检未通过</small></article>
+            <article class="metric"><span>槽位 / 缺口</span><strong id="metricSlots">—</strong><small id="metricSlotsNote">补齐容量</small></article>
           </div>
 
+          <section class="panel pull-hero-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>质检后拉取</h2>
+                <p>主推出口 · 上游 API → 质检 → 仅返回合格代理（qualified-proxies）</p>
+              </div>
+              <span class="status-chip ready" id="pullConfiguredChip">检查中</span>
+            </div>
+            <div class="pool-links">
+              <label>
+                <span>质检后拉取 URL（主推）</span>
+                <input id="dashQualifiedUrl" readonly>
+                <button class="text-button" type="button" data-copy="dashQualifiedUrl">复制</button>
+              </label>
+            </div>
+            <p class="settings-hint pool-hint" id="dashPullHint">
+              三条流：① 质检推荐 = 本地址；② 8892 兼容 = <code>GET /api?user=&amp;pass=</code>（旧客户端）；③ 账号池出口 = Resin/GPT/Clash（见「出口订阅」）。
+              <code>scheme</code> / <code>protocol</code> 等价，取值 <code>http</code> 或 <code>socks5h</code>。
+            </p>
+            <p class="settings-hint pool-hint" id="dashSourceStatus">代理源：—</p>
+          </section>
+
           <div class="dashboard-grid">
-            <section class="panel launch-panel">
-              <div class="panel-heading"><div><h2>启动注册任务</h2><p>设置本轮数量与并发</p></div><span class="status-chip ready" id="configBadge">配置就绪</span></div>
-              <form id="taskForm">
+            <section class="panel">
+              <div class="panel-heading">
+                <div><h2>库存与质检</h2><p>合格 / 拒绝 / 原因分布 · 历史曲线</p></div>
+                <button class="secondary-button" type="button" id="ensureCapacityButton">补齐容量</button>
+              </div>
+              <div class="chain-grid inventory-grid">
+                <div><span>扫描</span><strong id="invScanned">—</strong></div>
+                <div><span>合格</span><strong id="invAccepted">—</strong></div>
+                <div><span>拒绝</span><strong id="invRejected">—</strong></div>
+                <div><span>有效槽</span><strong id="invSlots">—</strong></div>
+              </div>
+              <div class="history-chart" id="invHistoryChart" aria-label="库存历史"></div>
+              <div class="reason-list" id="invReasons"><div class="empty-cell">暂无拒绝原因</div></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <div><h2>容量</h2><p>账号池槽位与自动补号</p></div>
+                <button class="text-button" type="button" data-go="accounts" data-tab="tasks">账号 · 任务</button>
+              </div>
+              <div class="chain-grid">
+                <div><span>有效账号</span><strong id="poolAccounts">—</strong></div>
+                <div><span>有效槽位</span><strong id="poolSlots">—</strong></div>
+                <div><span>缺口账号</span><strong id="poolNeeded">—</strong></div>
+                <div><span>自动补号</span><strong id="poolAuto">—</strong></div>
+              </div>
+              <p class="settings-hint pool-hint">补齐容量会按当前质检规则评估槽位，不足时启动注册补号（不含完整注册控制台）。</p>
+            </section>
+          </div>
+        </section>
+
+        <!-- 代理源 -->
+        <section class="view" id="view-sources">
+          <section class="panel page-panel">
+            <div class="panel-heading">
+              <div><h2>代理源</h2><p>拉代理 API 账号 · 外部拉取与本地短路互斥</p></div>
+            </div>
+            <form id="sourcesSettingsForm" class="settings-form">
+              <div class="callout" id="sourcesModeCallout">
+                <strong id="sourcesModeTitle">拉取模式</strong>
+                <p id="sourcesModeHint">填写上游地址后保存。若地址指向本机 8892 /api，将走本地账号池短路，不会再请求外部。</p>
+              </div>
+              <div class="form-grid">
+                <label><span>拉代理 API 地址</span><input id="pull_api_base" placeholder="http://host:8892/api 或外部列表 URL"></label>
+                <label><span>导出协议 scheme</span>
+                  <select id="export_proxy_protocol">
+                    <option value="http">http</option>
+                    <option value="socks5h">socks5h</option>
+                  </select>
+                </label>
+                <label><span>user</span><input id="pull_api_user" placeholder="账号" autocomplete="off"></label>
+                <label><span>pass</span><input id="pull_api_pass" type="password" placeholder="密码" autocomplete="off"></label>
+                <label><span>shuliang</span><input id="pull_api_shuliang" type="number" min="1" max="10000" value="100"></label>
+                <label><span>id</span><input id="pull_api_id" type="number" min="1" max="100000" value="1"></label>
+              </div>
+              <p class="settings-hint">
+                <code>scheme</code> 与查询参数 <code>protocol</code> 等价，影响质检后拉取、8892 兼容、账号池导出。
+                URL 上可临时覆盖：<code>?scheme=socks5h</code> 或 <code>?protocol=http</code>。
+              </p>
+              <p class="settings-hint" id="sourcesMutexHint">
+                互斥：配置「外部上游」时，质检流水线会 HTTP 拉取该列表；若 base 指向本机 <code>/api</code> 或 <code>:8892</code>，则短路读本地账号池，二者不会同时生效。
+              </p>
+              <div class="settings-actions">
+                <button class="primary-button settings-save" type="submit">保存代理源</button>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <!-- 质检规则 -->
+        <section class="view" id="view-quality">
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>质检规则</h2><p>ARP / 延迟 / 国家 · 不合格不进入池与导出</p></div>
+              <div class="heading-actions">
+                <span class="status-chip queued" id="qualityVersionChip">version —</span>
+              </div>
+            </div>
+            <form id="qualitySettingsForm" class="settings-form">
+              <div class="form-grid">
+                <label><span>当前编辑 profile</span>
+                  <select id="quality_profile_id">
+                    <option value="default">默认</option>
+                    <option value="arp-strict">ARP 严格</option>
+                    <option value="geo-only">仅地理/延迟</option>
+                  </select>
+                </label>
+                <label><span>出口绑定 profile</span>
+                  <select id="export_quality_profile">
+                    <option value="default">默认</option>
+                    <option value="arp-strict">ARP 严格</option>
+                    <option value="geo-only">仅地理/延迟</option>
+                  </select>
+                </label>
+              </div>
+              <p class="settings-hint">多规则：编辑并保存会写入当前 profile；出口订阅的 qualified-proxies 使用「出口绑定」profile（URL 带 <code>rule=</code>）。内置 <code>arp-strict</code> / <code>geo-only</code> 可直接切换。</p>
+              <label class="check-row"><input id="proxy_quality_enabled" type="checkbox" checked><span>启用代理质检</span></label>
+              <div class="form-grid">
+                <label><span>最大延迟 ms</span><input id="proxy_max_latency_ms" type="number" min="200" max="60000" value="3000"></label>
+                <label><span>排除国家</span><input id="proxy_exclude_countries" placeholder="US" value="US"></label>
+                <label><span>质检并发</span><input id="proxy_quality_workers" type="number" min="1" max="64" value="16"></label>
+                <label><span>质检缓存秒</span><input id="proxy_quality_cache_ttl_sec" type="number" min="30" max="86400" value="600"></label>
+              </div>
+              <label class="check-row"><input id="proxy_arp_check_enabled" type="checkbox" checked><span>启用 ARP 路径探测（Firefly / 可选 publish）</span></label>
+              <label><span>ARP 探测 URL</span><input id="proxy_arp_probe_url" placeholder="https://firefly-3p.ff.adobe.io/"></label>
+              <div class="form-grid">
+                <label><span>ARP publish URL（可选）</span><input id="arp_publish_url" placeholder="留空则只做路径探测"></label>
+                <label><span>ARP publish Token</span><input id="arp_publish_token" type="password" placeholder="X-Internal-Token" autocomplete="off"></label>
+              </div>
+              <p class="settings-hint" id="qualityMetaHint">规则 version / updated_at 在保存后更新。</p>
+              <div class="settings-actions">
+                <button class="primary-button settings-save" type="submit">保存质检规则</button>
+                <button class="secondary-button" type="button" id="activateProfileButton">切换为当前 profile</button>
+              </div>
+            </form>
+          </section>
+          <section class="panel" style="margin-top:18px">
+            <div class="panel-heading"><div><h2>规则变更审计</h2><p>最近质检 profile 变更记录</p></div></div>
+            <div class="table-wrap" style="padding:0 18px 18px">
+              <table>
+                <thead><tr><th>时间</th><th>动作</th><th>详情</th></tr></thead>
+                <tbody id="qualityAuditBody"><tr><td colspan="3" class="empty-cell">暂无记录</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel page-panel" style="margin-top:18px">
+            <div class="panel-heading">
+              <div><h2>质检试跑（dry-run）</h2><p>粘贴若干条代理，按当前/指定 profile 试跑，不写库存</p></div>
+            </div>
+            <form id="qualityDryRunForm" class="settings-form">
+              <label><span>代理列表（每行一条，最多 50）</span>
+                <textarea id="dryRunProxies" rows="8" placeholder="http://user:pass@host:port&#10;socks5h://user:pass@host:port"></textarea>
+              </label>
+              <div class="settings-actions">
+                <button class="primary-button settings-save" type="submit">试跑质检</button>
+                <p class="settings-hint">结果仅展示，不改缓存强制刷新（use_cache=false）。</p>
+              </div>
+            </form>
+            <div class="table-wrap" style="padding:0 18px 18px">
+              <table>
+                <thead><tr><th>代理</th><th>结果</th><th>延迟</th><th>国家</th><th>原因</th></tr></thead>
+                <tbody id="dryRunBody"><tr><td colspan="5" class="empty-cell">尚未试跑</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <!-- 出口订阅 -->
+        <section class="view" id="view-exports">
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>出口订阅</h2><p>主推质检拉取；兼容流保留但不强调</p></div>
+            </div>
+            <div class="pool-links">
+              <label class="export-primary">
+                <span>① 质检推荐 · qualified-proxies</span>
+                <input id="poolQualifiedUrl" readonly>
+                <button class="text-button" type="button" data-copy="poolQualifiedUrl">复制</button>
+              </label>
+              <label>
+                <span>② 8892 兼容 · GET /api（旧客户端）</span>
+                <input id="compatApiSample" readonly>
+                <button class="text-button" type="button" data-copy="compatApiSample">复制</button>
+              </label>
+              <label>
+                <span>③ 账号池 · Resin（本机 live-proxies）</span>
+                <input id="poolResinUrl" readonly>
+                <button class="text-button" type="button" data-copy="poolResinUrl">复制</button>
+              </label>
+              <label>
+                <span>③ 账号池 · GPT 网关订阅</span>
+                <input id="poolGptUrl" readonly>
+                <button class="text-button" type="button" data-copy="poolGptUrl">复制</button>
+              </label>
+              <label>
+                <span>③ 账号池 · Clash / Stash</span>
+                <input id="poolClashUrl" readonly>
+                <button class="text-button" type="button" data-copy="poolClashUrl">复制</button>
+                <button class="text-button" type="button" id="downloadClashButton">下载 YAML</button>
+              </label>
+              <label>
+                <span>③ 账号池 · 小火箭 / URI</span>
+                <input id="poolLadderUrl" readonly>
+                <button class="text-button" type="button" data-copy="poolLadderUrl">复制</button>
+              </label>
+              <label>
+                <span>GPT 网关样例</span>
+                <input id="poolGptSample" readonly>
+                <button class="text-button" type="button" data-copy="poolGptSample">复制</button>
+              </label>
+            </div>
+            <p class="settings-hint pool-hint">
+              别名：<code>/api/v1/exports/*</code> 与 <code>/api/export/*</code> 等价。旧路径继续可用。
+              Clash 请点复制，勿手打省略号；拉不下来用「下载 YAML」。
+              质检 URL 含 <code>rule=</code> 绑定出口 profile。
+            </p>
+            <form id="exportsSettingsForm" class="settings-form" style="padding-top:0">
+              <div class="form-grid">
+                <label><span>出口绑定质检 profile</span>
+                  <select id="export_quality_profile_exports">
+                    <option value="default">默认</option>
+                    <option value="arp-strict">ARP 严格</option>
+                    <option value="geo-only">仅地理/延迟</option>
+                  </select>
+                </label>
+              </div>
+              <div class="settings-actions">
+                <button class="primary-button settings-save" type="submit">保存出口绑定</button>
+              </div>
+            </form>
+          </section>
+          <section class="panel page-panel" style="margin-top:18px">
+            <div class="panel-heading"><div><h2>历史代理文件</h2><p>任务产物 txt · 账号明细下载在「账号」页</p></div></div>
+            <div class="file-list" id="proxyFiles"></div>
+          </section>
+        </section>
+
+        <!-- 账号（含任务二级） -->
+        <section class="view" id="view-accounts">
+          <div class="subtabs" role="tablist" aria-label="账号分区">
+            <button type="button" class="subtab active" data-account-tab="list">账号列表</button>
+            <button type="button" class="subtab" data-account-tab="tasks">任务日志</button>
+            <button type="button" class="subtab subtab-muted" data-account-tab="register">注册补号（次要）</button>
+          </div>
+
+          <div class="account-tab active" id="account-tab-list">
+            <section class="panel page-panel">
+              <div class="panel-heading">
+                <div><h2>账号</h2><p>导入删除；过期账号打开列表 / 同步用量 / 池巡检时自动删除</p></div>
+                <div class="heading-actions">
+                  <button class="secondary-button" type="button" id="importAccountsButton">导入</button>
+                  <button class="secondary-button" type="button" id="syncUsageButton">同步用量</button>
+                  <button class="danger-button" type="button" id="deleteSelectedAccounts" disabled>删除所选</button>
+                  <button class="secondary-button" type="button" id="downloadLatestAccounts">下载最新明细</button>
+                </div>
+              </div>
+              <div class="table-wrap"><table><thead><tr>
+                <th class="check-col"><input type="checkbox" id="accountSelectAll" aria-label="全选"></th>
+                <th>邮箱</th><th>验证</th><th>到期</th><th>剩余流量</th><th>代理</th><th>API</th><th></th>
+              </tr></thead><tbody id="accountsBody"></tbody></table></div>
+            </section>
+          </div>
+
+          <div class="account-tab" id="account-tab-register">
+            <section class="panel page-panel">
+              <div class="panel-heading">
+                <div><h2>注册补号</h2><p>账号供给子模块 · 非主产品入口</p></div>
+                <span class="status-chip ready" id="configBadge">配置就绪</span>
+              </div>
+              <form id="taskForm" class="settings-form">
                 <div class="segment" role="group" aria-label="注册模式">
                   <button type="button" class="segment-button active" data-mode="single">单个</button>
                   <button type="button" class="segment-button" data-mode="batch">批量</button>
@@ -60,148 +329,99 @@
                 <div class="runtime-strip">
                   <div><span>邮箱来源</span><strong id="runtimeMail">—</strong></div>
                   <div><span>Turnstile</span><strong id="runtimeCaptcha">—</strong></div>
-                  <div><span>输出方式</span><strong>账号 + 代理</strong></div>
+                  <div><span>注册出网</span><strong id="runtimeProxy">—</strong></div>
                 </div>
                 <button class="primary-button" type="submit" id="startButton">启动任务</button>
+                <p class="settings-hint">邮箱 / 打码 / 注册出网代理请到「设置」配置。</p>
               </form>
-            </section>
-
-            <section class="panel tasks-panel">
-              <div class="panel-heading"><div><h2>最近任务</h2><p>实时执行状态</p></div><button class="text-button" data-go="tasks">查看全部</button></div>
-              <div class="table-wrap"><table><thead><tr><th>任务</th><th>进度</th><th>代理</th><th>状态</th><th>时间</th></tr></thead><tbody id="recentTasksBody"><tr><td colspan="5" class="empty-cell">正在加载</td></tr></tbody></table></div>
             </section>
           </div>
 
-            <section class="panel chain-panel">
-            <div class="panel-heading"><div><h2>链路状态</h2><p>当前运行配置</p></div></div>
-            <div class="chain-grid">
-              <div><span>Turnstile</span><strong id="chainCaptcha">—</strong></div>
-              <div><span>邮箱服务</span><strong id="chainMail">—</strong></div>
-              <div><span>Premium trial</span><strong>自动领取</strong></div>
-              <div><span>代理输出</span><strong id="chainProxy">—</strong></div>
-              <div><span>凭据文件</span><strong>0600</strong></div>
-            </div>
-          </section>
-
-          <section class="panel pool-panel">
-            <div class="panel-heading">
-              <div><h2>Resin / GPT 池</h2><p>有多少有效号就导出多少×8 条代理；Resin 按条数可同时连，加 1 个号就多 8 路</p></div>
-              <button class="secondary-button" type="button" id="ensureCapacityButton">补齐容量</button>
-            </div>
-            <div class="chain-grid">
-              <div><span>有效账号</span><strong id="poolAccounts">—</strong></div>
-              <div><span>有效槽位</span><strong id="poolSlots">—</strong></div>
-              <div><span>缺口账号</span><strong id="poolNeeded">—</strong></div>
-              <div><span>自动补号</span><strong id="poolAuto">—</strong></div>
-            </div>
-            <div class="pool-links">
-              <label><span>Resin 订阅（本机）</span><input id="poolResinUrl" readonly><button class="text-button" type="button" data-copy="poolResinUrl">复制</button></label>
-              <label><span>GPT 订阅（条数=有效槽，全是 8970 身份）</span><input id="poolGptUrl" readonly><button class="text-button" type="button" data-copy="poolGptUrl">复制</button></label>
-              <label><span>梯子订阅（Clash / Stash）</span><input id="poolClashUrl" readonly><button class="text-button" type="button" data-copy="poolClashUrl">复制</button><button class="text-button" type="button" id="downloadClashButton">下载 YAML</button></label>
-              <label><span>梯子订阅（小火箭 / URI）</span><input id="poolLadderUrl" readonly><button class="text-button" type="button" data-copy="poolLadderUrl">复制</button></label>
-              <label><span>GPT 网关样例</span><input id="poolGptSample" readonly><button class="text-button" type="button" data-copy="poolGptSample">复制</button></label>
-            </div>
-            <p class="settings-hint pool-hint">Clash Verge 只填「梯子订阅（Clash / Stash）」，必须点复制，不要手打或粘说明里的省略号。拉不下来就点「下载 YAML」，在 Clash Verge 里用本地配置导入。梯子走 8970，条数=有效槽（账号数×8）。</p>
-          </section>
+          <div class="account-tab" id="account-tab-tasks">
+            <section class="panel page-panel">
+              <div class="panel-heading"><div><h2>任务日志</h2><p>历史执行与产出</p></div></div>
+              <div class="table-wrap"><table><thead><tr><th>任务</th><th>请求</th><th>完成</th><th>成功</th><th>代理</th><th>状态</th><th>时间</th></tr></thead><tbody id="allTasksBody"></tbody></table></div>
+            </section>
+          </div>
         </section>
 
-        <section class="view" id="view-accounts">
-          <section class="panel page-panel">
-            <div class="panel-heading">
-              <div><h2>账号管理</h2><p>查看编辑、导入删除；过期时间和剩余流量从 ProxyScrape 同步</p></div>
-              <div class="heading-actions">
-                <button class="secondary-button" type="button" id="importAccountsButton">导入</button>
-                <button class="secondary-button" type="button" id="syncUsageButton">同步用量</button>
-                <button class="danger-button" type="button" id="deleteSelectedAccounts" disabled>删除所选</button>
-                <button class="secondary-button" type="button" id="downloadLatestAccounts">下载最新明细</button>
-              </div>
-            </div>
-            <div class="table-wrap"><table><thead><tr>
-              <th class="check-col"><input type="checkbox" id="accountSelectAll" aria-label="全选"></th>
-              <th>邮箱</th><th>验证</th><th>到期</th><th>剩余流量</th><th>代理</th><th>API</th><th></th>
-            </tr></thead><tbody id="accountsBody"></tbody></table></div>
-          </section>
-        </section>
+        <!-- 设置 -->
+        <section class="view" id="view-settings">
+          <div class="subtabs" role="tablist" aria-label="设置分组">
+            <button type="button" class="subtab active" data-settings-tab="registration">注册出网</button>
+            <button type="button" class="subtab" data-settings-tab="mail">邮箱服务</button>
+            <button type="button" class="subtab" data-settings-tab="captcha">打码接口</button>
+          </div>
 
-        <section class="view" id="view-mail">
-          <section class="panel page-panel">
-            <div class="panel-heading"><div><h2>邮箱接口</h2><p>云芯 / YYDS 收信配置，保存后立即同步到注册进程</p></div></div>
-            <form id="mailSettingsForm" class="settings-form">
-              <div class="form-grid">
-                <label><span>邮箱提供方</span>
-                  <select id="mail_provider">
-                    <option value="yunxin">云芯 Yunxin</option>
-                    <option value="yyds">YYDS Mail</option>
-                  </select>
-                </label>
-                <label><span>邮箱类型</span><input id="mail_type" placeholder="mail"></label>
-                <label><span>邮箱后缀</span><input id="mail_suffix" placeholder="mail.com"></label>
-                <label><span>指定域名</span><input id="mail_domain" placeholder="可空"></label>
+          <div class="settings-tab active" id="settings-tab-registration">
+            <section class="panel page-panel">
+              <div class="panel-heading">
+                <div><h2>注册出网</h2><p>请求 ProxyScrape / 邮箱 / 打码时使用的 HTTP 代理（与拉代理 API 无关）</p></div>
               </div>
-              <label><span>云芯 API 地址</span><input id="mail_api_base" placeholder="https://mail.example.com"></label>
-              <label><span>云芯 API Key</span><input id="mail_api_key" placeholder="mail_api_key"></label>
-              <div class="form-grid">
-                <label><span>YYDS API Key</span><input id="yyds_api_key" placeholder="可空，提供方为 YYDS 时必填"></label>
-                <label><span>YYDS 域名</span><input id="yyds_domain" placeholder="可空"></label>
-              </div>
-              <div class="settings-actions">
-                <button class="primary-button settings-save" type="submit">保存邮箱设置</button>
-                <p class="settings-hint">保存后写入 config.local.json，当前和后续注册任务都会用这份配置。</p>
-              </div>
-            </form>
-          </section>
-        </section>
+              <form id="registrationSettingsForm" class="settings-form">
+                <label class="check-row"><input id="proxy_enabled" type="checkbox"><span>启用出口代理</span></label>
+                <label><span>HTTP 代理</span><input id="http_proxy" placeholder="http://user:pass@host:port"></label>
+                <label><span>HTTPS 代理</span><input id="https_proxy" placeholder="留空则复用 HTTP 代理"></label>
+                <label><span>不走代理</span><input id="no_proxy" placeholder="localhost,127.0.0.1"></label>
+                <div class="settings-actions">
+                  <button class="primary-button settings-save" type="submit">保存注册出网</button>
+                  <p class="settings-hint">这是注册进程自己上网用的出口；业务客户端拉代理请用「代理源」+「质检后拉取」。</p>
+                </div>
+              </form>
+            </section>
+          </div>
 
-        <section class="view" id="view-captcha">
-          <section class="panel page-panel">
-            <div class="panel-heading"><div><h2>打码 API</h2><p>Turnstile / 2Captcha 接口，保存后立即同步到注册进程</p></div></div>
-            <form id="captchaSettingsForm" class="settings-form">
-              <div class="form-grid">
-                <label><span>打码方式</span>
-                  <select id="captcha_provider">
-                    <option value="2captcha">2Captcha API</option>
-                    <option value="browser">浏览器扩展</option>
-                  </select>
-                </label>
-                <label><span>超时秒数</span><input id="captcha_timeout" type="number" min="30" max="600"></label>
-                <label><span>轮询间隔秒</span><input id="captcha_poll_interval" type="number" min="5" max="60"></label>
-                <label><span>扩展路径</span><input id="turnstile_extension_path" placeholder="browser 模式使用，可空"></label>
-              </div>
-              <label><span>打码 API 地址</span><input id="captcha_api_base" placeholder="https://api.2captcha.com"></label>
-              <label><span>打码 API Key</span><input id="captcha_api_key" placeholder="2captcha client key"></label>
-              <div class="settings-actions">
-                <button class="primary-button settings-save" type="submit">保存打码设置</button>
-                <p class="settings-hint">2Captcha 需要填写 Key。browser 模式走本机 Chromium + turnstile 扩展。</p>
-              </div>
-            </form>
-          </section>
-        </section>
+          <div class="settings-tab" id="settings-tab-mail">
+            <section class="panel page-panel">
+              <div class="panel-heading"><div><h2>邮箱服务</h2><p>云芯 / YYDS 收信配置</p></div></div>
+              <form id="mailSettingsForm" class="settings-form">
+                <div class="form-grid">
+                  <label><span>邮箱提供方</span>
+                    <select id="mail_provider">
+                      <option value="yunxin">云芯 Yunxin</option>
+                      <option value="yyds">YYDS Mail</option>
+                    </select>
+                  </label>
+                  <label><span>邮箱类型</span><input id="mail_type" placeholder="mail"></label>
+                  <label><span>邮箱后缀</span><input id="mail_suffix" placeholder="mail.com"></label>
+                  <label><span>指定域名</span><input id="mail_domain" placeholder="可空"></label>
+                </div>
+                <label><span>云芯 API 地址</span><input id="mail_api_base" placeholder="https://mail.example.com"></label>
+                <label><span>云芯 API Key</span><input id="mail_api_key" placeholder="mail_api_key"></label>
+                <div class="form-grid">
+                  <label><span>YYDS API Key</span><input id="yyds_api_key" placeholder="可空，提供方为 YYDS 时必填"></label>
+                  <label><span>YYDS 域名</span><input id="yyds_domain" placeholder="可空"></label>
+                </div>
+                <div class="settings-actions">
+                  <button class="primary-button settings-save" type="submit">保存邮箱设置</button>
+                </div>
+              </form>
+            </section>
+          </div>
 
-        <section class="view" id="view-proxies">
-          <section class="panel">
-            <div class="panel-heading"><div><h2>注册出口代理</h2><p>请求 ProxyScrape / 邮箱 / 打码时使用的 HTTP 代理</p></div></div>
-            <form id="proxySettingsForm" class="settings-form">
-              <label class="check-row"><input id="proxy_enabled" type="checkbox"><span>启用出口代理</span></label>
-              <label><span>HTTP 代理</span><input id="http_proxy" placeholder="http://user:pass@host:port"></label>
-              <label><span>HTTPS 代理</span><input id="https_proxy" placeholder="留空则复用 HTTP 代理"></label>
-              <label><span>不走代理</span><input id="no_proxy" placeholder="localhost,127.0.0.1"></label>
-              <div class="settings-actions">
-                <button class="primary-button settings-save" type="submit">保存代理设置</button>
-                <p class="settings-hint">这里是注册过程自己上网用的代理，不是下面导出给业务用的节点列表。</p>
-              </div>
-            </form>
-          </section>
-          <section class="panel page-panel" style="margin-top:18px">
-            <div class="panel-heading"><div><h2>代理输出</h2><p>按任务生成的 HTTP 代理文件</p></div></div>
-            <div class="file-list" id="proxyFiles"></div>
-          </section>
-        </section>
-
-        <section class="view" id="view-tasks">
-          <section class="panel page-panel">
-            <div class="panel-heading"><div><h2>任务日志</h2><p>历史执行与产出记录</p></div></div>
-            <div class="table-wrap"><table><thead><tr><th>任务</th><th>请求</th><th>完成</th><th>成功</th><th>代理</th><th>状态</th><th>时间</th></tr></thead><tbody id="allTasksBody"></tbody></table></div>
-          </section>
+          <div class="settings-tab" id="settings-tab-captcha">
+            <section class="panel page-panel">
+              <div class="panel-heading"><div><h2>打码接口</h2><p>Turnstile / 2Captcha</p></div></div>
+              <form id="captchaSettingsForm" class="settings-form">
+                <div class="form-grid">
+                  <label><span>打码方式</span>
+                    <select id="captcha_provider">
+                      <option value="2captcha">2Captcha API</option>
+                      <option value="browser">浏览器扩展</option>
+                    </select>
+                  </label>
+                  <label><span>超时秒数</span><input id="captcha_timeout" type="number" min="30" max="600"></label>
+                  <label><span>轮询间隔秒</span><input id="captcha_poll_interval" type="number" min="5" max="60"></label>
+                  <label><span>扩展路径</span><input id="turnstile_extension_path" placeholder="browser 模式使用，可空"></label>
+                </div>
+                <label><span>打码 API 地址</span><input id="captcha_api_base" placeholder="https://api.2captcha.com"></label>
+                <label><span>打码 API Key</span><input id="captcha_api_key" placeholder="2captcha client key"></label>
+                <div class="settings-actions">
+                  <button class="primary-button settings-save" type="submit">保存打码设置</button>
+                </div>
+              </form>
+            </section>
+          </div>
         </section>
       </main>
     </div>
@@ -284,7 +504,6 @@
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div class="sidebar-scrim" id="sidebarScrim"></div>
-  <script src="{{ url_for('static', filename='app.js') }}?v=pool11" defer></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=ia2" defer></script>
 </body>
 </html>
-

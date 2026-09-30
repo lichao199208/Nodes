@@ -971,13 +971,34 @@ def provision_api_key(session, access_token, account_id, permissions=None, name=
 
 
 # ── 拉取免费 datacenter 代理 ────────────────────────────
-def list_proxy_hosts(access_token, account_id):
+SUPPORTED_PROXY_PROTOCOLS = ("http", "socks5h")
+
+
+def normalize_proxy_protocol(value, default="http"):
+    """Normalize UI/config/query protocol to url scheme http or socks5h."""
+    text = str(value or "").strip().lower()
+    if text in {"", "default"}:
+        text = str(default or "http").strip().lower()
+    if text in {"socks5", "socks", "socks5h"}:
+        return "socks5h"
+    if text in {"http", "https"}:
+        return "http"
+    raise ValueError("代理协议仅支持 http 或 socks5h")
+
+
+def proxyscrape_protocol_param(scheme):
+    """ProxyScrape list API accepts http/socks5 (not socks5h)."""
+    return "socks5" if normalize_proxy_protocol(scheme) == "socks5h" else "http"
+
+
+def list_proxy_hosts(access_token, account_id, protocol="http"):
     headers = _auth_headers(access_token)
+    api_protocol = proxyscrape_protocol_param(protocol)
 
     def _list():
         response = requests.get(
             f"{PS_BASE}/v2/v4/account/{account_id}/datacenter_shared/proxy-list",
-            headers=headers, params={"protocol": "http", "format": "normal"}, timeout=25,
+            headers=headers, params={"protocol": api_protocol, "format": "normal"}, timeout=25,
         )
         response.raise_for_status()
         return response.text
@@ -989,20 +1010,25 @@ def list_proxy_hosts(access_token, account_id):
     return proxies
 
 
-def fetch_proxies(access_token, account_id):
+def fetch_proxies(access_token, account_id, protocol="http"):
     """注册后 Premium trial 自带 100 个 datacenter 共享代理。
     从 overview 拿账密，从 proxy-list 端点拿 ip:port 列表。"""
     extras = overview_credentials(fetch_service_overview(access_token, account_id))
     user, pwd = extras["proxy_username"], extras["proxy_password"]
-    proxies = list_proxy_hosts(access_token, account_id)
+    proxies = list_proxy_hosts(access_token, account_id, protocol=protocol)
     return user, pwd, proxies, extras
 
 
-def _format_proxy_url(user, pwd, ip):
-    raw = f"{user}:{pwd}@{ip}".strip()
+def _format_proxy_url(user, pwd, ip, protocol="http"):
+    scheme = normalize_proxy_protocol(protocol)
+    host = str(ip or "").strip()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    raw = f"{user}:{pwd}@{host}".strip()
     if re.match(r"^[a-z][a-z0-9+.-]*://", raw, re.I):
-        return raw
-    return f"http://{raw}"
+        rest = raw.split("://", 1)[1]
+        return f"{scheme}://{rest}"
+    return f"{scheme}://{raw}"
 
 
 def _append_private(path, text):
@@ -1013,10 +1039,10 @@ def _append_private(path, text):
     os.chmod(path, 0o600)
 
 
-def save_proxies(user, pwd, proxies, path):
-    """追加写入本轮代理文件，格式 http://user:pass@ip:port。"""
+def save_proxies(user, pwd, proxies, path, protocol="http"):
+    """追加写入本轮代理文件，格式 {http|socks5h}://user:pass@ip:port。"""
     with _file_lock:
-        text = "".join(f"{_format_proxy_url(user, pwd, ip)}\n" for ip in proxies)
+        text = "".join(f"{_format_proxy_url(user, pwd, ip, protocol=protocol)}\n" for ip in proxies)
         _append_private(path, text)
 
 

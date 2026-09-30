@@ -1,7 +1,8 @@
 FROM python:3.12-slim-bookworm
 
-LABEL org.opencontainers.image.source="https://github.com/lichao199208/Nodes" \
-      org.opencontainers.image.version="20260918-yunxin4-dashboard"
+LABEL org.opencontainers.image.source="https://github.com/kingenbomb/Nodes" \
+      org.opencontainers.image.revision="1216835354d0c68b768b59ce137b75f40fe3e9ac" \
+      org.opencontainers.image.version="1216835-yunxin4-dashboard"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \

@@ -18,9 +18,29 @@ DEFAULT_LOOP_SECONDS = 120
 DEFAULT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_GATEWAY_PORT = 8970
 DEFAULT_PLATFORM = "Nodes"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}
+
+
+def is_loopback_host(host):
+    return str(host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+def advertise_gateway_host(configured_host, public_host=None):
+    """Host written into GPT/Clash/ladder export lines.
+
+    Resin often binds on loopback while remote subscribers need a reachable IP.
+    Prefer an explicit public/advertise host whenever the configured host is local.
+    """
+    configured = str(configured_host or "").strip() or DEFAULT_GATEWAY_HOST
+    public = str(public_host or "").strip()
+    if not is_loopback_host(configured):
+        return configured
+    if public and not is_loopback_host(public):
+        return public
+    return configured
 
 _PROXY_LINE = re.compile(
-    r"^(?:https?://)?([^:@/]+):([^@/]+)@(\[[^\]]+\]:\d+|[^/\s]+)",
+    r"^(?:(?:https?|socks5h?)://)?([^:@/]+):([^@/]+)@(\[[^\]]+\]:\d+|[^/\s]+)",
     re.I,
 )
 
@@ -183,11 +203,17 @@ def capacity(entries, settings):
     }
 
 
-def format_proxy_lines(entries, format_url):
+def format_proxy_lines(entries, format_url, protocol="http"):
     lines = []
     for item in entries:
         for host in item["slots"]:
-            lines.append(format_url(item["proxy_username"], item["proxy_password"], host))
+            try:
+                lines.append(format_url(
+                    item["proxy_username"], item["proxy_password"], host, protocol=protocol,
+                ))
+            except TypeError:
+                # Back-compat with callables that only accept user/pwd/host.
+                lines.append(format_url(item["proxy_username"], item["proxy_password"], host))
     return lines
 
 
@@ -199,13 +225,14 @@ def gateway_identity(index, auth_version, platform, token):
     return token, f"{platform}:{account}"
 
 
-def gpt_gateway_lines(count, token, host, port, auth_version, platform):
+def gpt_gateway_lines(count, token, host, port, auth_version, platform, protocol="http"):
+    scheme = "socks5h" if str(protocol or "").strip().lower() in {"socks5", "socks", "socks5h"} else "http"
     lines = []
     total = max(0, int(count))
     for index in range(1, total + 1):
         user, password = gateway_identity(index, auth_version, platform, token)
         lines.append(
-            f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{int(port)}"
+            f"{scheme}://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{int(port)}"
         )
     return lines
 
@@ -214,17 +241,18 @@ def _yaml_quote(value):
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def clash_yaml(count, token, host, port, auth_version, platform):
+def clash_yaml(count, token, host, port, auth_version, platform, protocol="http"):
     total = max(0, int(count))
     names = []
     proxy_blocks = []
+    clash_type = "socks5" if str(protocol or "").strip().lower() in {"socks5", "socks", "socks5h"} else "http"
     for index in range(1, total + 1):
         user, password = gateway_identity(index, auth_version, platform, token)
         name = f"{platform}-{index:02d}"
         names.append(name)
         proxy_blocks.extend([
             f"  - name: {_yaml_quote(name)}",
-            "    type: http",
+            f"    type: {clash_type}",
             f"    server: {_yaml_quote(host)}",
             f"    port: {int(port)}",
             f"    username: {_yaml_quote(user)}",
@@ -273,20 +301,23 @@ def clash_yaml(count, token, host, port, auth_version, platform):
     return "\n".join(lines)
 
 
-def ladder_uri_lines(count, token, host, port, auth_version, platform):
+def ladder_uri_lines(count, token, host, port, auth_version, platform, protocol="http"):
+    scheme = "socks5h" if str(protocol or "").strip().lower() in {"socks5", "socks", "socks5h"} else "http"
     lines = []
     total = max(0, int(count))
     for index in range(1, total + 1):
         user, password = gateway_identity(index, auth_version, platform, token)
         tag = quote_plus(f"{platform}-{index:02d}")
         lines.append(
-            f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{int(port)}#{tag}"
+            f"{scheme}://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{int(port)}#{tag}"
         )
     return lines
 
 
-def ladder_base64(count, token, host, port, auth_version, platform):
-    body = "\n".join(ladder_uri_lines(count, token, host, port, auth_version, platform))
+def ladder_base64(count, token, host, port, auth_version, platform, protocol="http"):
+    body = "\n".join(ladder_uri_lines(
+        count, token, host, port, auth_version, platform, protocol=protocol,
+    ))
     if body:
         body += "\n"
     return base64.b64encode(body.encode("utf-8")).decode("ascii")
