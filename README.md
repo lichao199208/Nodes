@@ -18,7 +18,7 @@ Nodes 是一个面向 ProxyScrape 账户注册、邮箱验证、试用代理领�
 - 可接入 [Resin](https://github.com/Resinat/Resin) 统一管理和调度。
 - 登录保护、CSRF、登录限速、安全 Cookie、字段脱敏和审计记录。
 
-在线入口：<https://zf.qkmss.com/nodes/>（是否开放及登录方式由部署者决定）。
+跑图站:https://qkmss.com
 
 ## 项目结构
 
