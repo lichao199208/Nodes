@@ -237,9 +237,6 @@ docker compose up -d dashboard dashboard-proxy
 
 本软件按“现状”提供，不对可用性、准确性、持续兼容性或特定用途作保证。使用者应自行确认操作授权、数据来源和合规要求，并独立承担账号封禁、费用、数据丢失、服务中断及其他直接或间接后果。项目作者和贡献者不对使用本项目产生的损失或法律责任负责。
 
-## 致谢
-
-- 上游项目：[kingenbomb/Nodes](https://github.com/kingenbomb/Nodes)
 - 代理池网关：[Resinat/Resin](https://github.com/Resinat/Resin)
 
 欢迎通过 Issue 提交可复现问题；请在提交日志前删除邮箱、Token、API Key、代理凭据和服务器信息。
