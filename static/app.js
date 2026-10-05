@@ -35,6 +35,24 @@ const settingFields = {
   exports: ['export_quality_profile'],
 };
 
+const captchaApiDefaults = {
+  '2captcha': 'https://api.2captcha.com',
+  yescaptcha: 'https://api.yescaptcha.com',
+  capmonster: 'https://api.capmonster.cloud',
+  browser: '',
+};
+
+function applyCaptchaProviderDefault(force = false) {
+  const provider = document.getElementById('captcha_provider');
+  const apiBase = document.getElementById('captcha_api_base');
+  if (!provider || !apiBase) return;
+  const next = captchaApiDefaults[provider.value] ?? '';
+  if (force || !apiBase.value.trim() || Object.values(captchaApiDefaults).includes(apiBase.value.trim())) {
+    apiBase.value = next;
+  }
+  apiBase.placeholder = next || 'browser 模式无需 API 地址';
+}
+
 function appUrl(path) {
   const normalized = path.startsWith('/') ? path : `/${path}`;
   return `${APP_BASE}${normalized}`;
@@ -572,6 +590,7 @@ function fillSettings(settings) {
     exportSelect.value = settings.export_quality_profile;
   }
   renderQualityMeta(settings);
+  applyCaptchaProviderDefault(false);
 }
 
 async function loadSettings(group) {
@@ -845,6 +864,9 @@ document.getElementById('mailSettingsForm').addEventListener('submit', event => 
 });
 document.getElementById('captchaSettingsForm').addEventListener('submit', event => {
   saveSettingsGroup(event, 'registration', settingFields.captcha, '打码设置已同步');
+});
+document.getElementById('captcha_provider')?.addEventListener('change', () => {
+  applyCaptchaProviderDefault(true);
 });
 document.getElementById('exportsSettingsForm')?.addEventListener('submit', event => {
   saveSettingsGroup(event, 'exports', settingFields.exports, '出口绑定已保存');
