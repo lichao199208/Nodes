@@ -628,7 +628,8 @@ def solve_turnstile_browser(headless=False, timeout=120):
 
 
 def _captcha_post(path, payload):
-    """Call a 2Captcha API v2 endpoint and normalize API/HTTP errors."""
+    """Call a createTask-compatible captcha API and normalize errors."""
+    provider_label = "YesCaptcha" if CAPTCHA_PROVIDER.lower() == "yescaptcha" else "2Captcha"
     try:
         response = requests.post(
             f"{CAPTCHA_API_BASE}{path}", json=payload, timeout=30,
@@ -636,21 +637,22 @@ def _captcha_post(path, payload):
         response.raise_for_status()
         data = response.json()
     except requests.RequestException as e:
-        raise RuntimeError(f"2Captcha HTTP 请求失败: {e}") from e
+        raise RuntimeError(f"{provider_label} HTTP 请求失败: {e}") from e
     except ValueError as e:
-        raise RuntimeError("2Captcha 返回了非 JSON 响应") from e
+        raise RuntimeError(f"{provider_label} 返回了非 JSON 响应") from e
 
     if data.get("errorId"):
         code = data.get("errorCode") or f"error-{data['errorId']}"
         description = data.get("errorDescription") or "未知错误"
-        raise RuntimeError(f"2Captcha {code}: {description}")
+        raise RuntimeError(f"{provider_label} {code}: {description}")
     return data
 
 
 def solve_turnstile_2captcha(timeout=None):
-    """Create and poll a proxyless 2Captcha Turnstile task."""
+    """Create and poll a proxyless Turnstile task through an API provider."""
+    provider_label = "YesCaptcha" if CAPTCHA_PROVIDER.lower() == "yescaptcha" else "2Captcha"
     if not CAPTCHA_API_KEY:
-        raise RuntimeError("captcha_provider=2captcha，但未配置 captcha_api_key")
+        raise RuntimeError(f"captcha_provider={CAPTCHA_PROVIDER}，但未配置 captcha_api_key")
 
     timeout = CAPTCHA_TIMEOUT if timeout is None else timeout
     created = _captcha_post("/createTask", {
@@ -663,9 +665,9 @@ def solve_turnstile_2captcha(timeout=None):
     })
     task_id = created.get("taskId")
     if not task_id:
-        raise RuntimeError("2Captcha createTask 未返回 taskId")
+        raise RuntimeError(f"{provider_label} createTask 未返回 taskId")
 
-    log(f"2Captcha 任务已创建: {task_id}")
+    log(f"{provider_label} 任务已创建: {task_id}")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(CAPTCHA_POLL_INTERVAL)
@@ -677,15 +679,22 @@ def solve_turnstile_2captcha(timeout=None):
         if status == "processing":
             continue
         if status != "ready":
-            raise RuntimeError(f"2Captcha 返回未知任务状态: {status!r}")
+            raise RuntimeError(f"{provider_label} 返回未知任务状态: {status!r}")
         token = str((result.get("solution") or {}).get("token") or "").strip()
         if not token:
-            raise RuntimeError("2Captcha 任务已完成，但未返回 Turnstile token")
+            raise RuntimeError(f"{provider_label} 任务已完成，但未返回 Turnstile token")
         cost = result.get("cost")
-        log(f"2Captcha Turnstile 已完成，token 长度={len(token)}"
+        log(f"{provider_label} Turnstile 已完成，token 长度={len(token)}"
             + (f"，费用={cost}" if cost else ""))
         return token
-    raise TimeoutError(f"2Captcha Turnstile 求解超时（任务 {task_id}）")
+    raise TimeoutError(f"{provider_label} Turnstile 求解超时（任务 {task_id}）")
+
+
+def solve_turnstile_yescaptcha(timeout=None):
+    """Solve Turnstile through YesCaptcha's createTask-compatible API."""
+    if not CAPTCHA_API_KEY:
+        raise RuntimeError("captcha_provider=yescaptcha，但未配置 captcha_api_key")
+    return solve_turnstile_2captcha(timeout=timeout)
 
 
 def solve_turnstile(headless=False, timeout=None):
@@ -693,6 +702,8 @@ def solve_turnstile(headless=False, timeout=None):
     provider = CAPTCHA_PROVIDER.replace("-", "").replace("_", "")
     if provider in {"2captcha", "2cap"}:
         return solve_turnstile_2captcha(timeout=timeout)
+    if provider in {"yescaptcha", "yescap"}:
+        return solve_turnstile_yescaptcha(timeout=timeout)
     if provider in {"browser", "local", "extension"}:
         return solve_turnstile_browser(
             headless=headless,

@@ -68,6 +68,16 @@ class TwoCaptchaSolverTests(unittest.TestCase):
         finally:
             target.CAPTCHA_PROVIDER = original_provider
 
+    @patch.object(target, "solve_turnstile_yescaptcha", return_value="yes-token")
+    def test_dispatches_to_yescaptcha(self, solve):
+        original_provider = target.CAPTCHA_PROVIDER
+        target.CAPTCHA_PROVIDER = "yescaptcha"
+        try:
+            self.assertEqual(target.solve_turnstile(headless=True), "yes-token")
+            solve.assert_called_once_with(timeout=None)
+        finally:
+            target.CAPTCHA_PROVIDER = original_provider
+
 
 class TwoCaptchaApiTests(unittest.TestCase):
     @patch.object(target.requests, "post")
