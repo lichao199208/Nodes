@@ -78,6 +78,16 @@ class TwoCaptchaSolverTests(unittest.TestCase):
         finally:
             target.CAPTCHA_PROVIDER = original_provider
 
+    @patch.object(target, "solve_turnstile_capmonster", return_value="capmonster-token")
+    def test_dispatches_to_capmonster(self, solve):
+        original_provider = target.CAPTCHA_PROVIDER
+        target.CAPTCHA_PROVIDER = "capmonster"
+        try:
+            self.assertEqual(target.solve_turnstile(headless=True), "capmonster-token")
+            solve.assert_called_once_with(timeout=None)
+        finally:
+            target.CAPTCHA_PROVIDER = original_provider
+
 
 class TwoCaptchaApiTests(unittest.TestCase):
     @patch.object(target.requests, "post")

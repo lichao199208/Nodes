@@ -459,8 +459,8 @@ def _apply_settings(payload):
     if mail_provider not in {"yunxin", "yyds"}:
         raise ValueError("邮箱提供方只能是 yunxin 或 yyds")
     captcha_provider = str(merged["captcha_provider"] or "2captcha").strip().lower()
-    if captcha_provider not in {"2captcha", "yescaptcha", "browser"}:
-        raise ValueError("打码方式只能是 2captcha、yescaptcha 或 browser")
+    if captcha_provider not in {"2captcha", "yescaptcha", "capmonster", "browser"}:
+        raise ValueError("打码方式只能是 2captcha、yescaptcha、capmonster 或 browser")
 
     timeout = int(merged["captcha_timeout"])
     poll = int(merged["captcha_poll_interval"])
@@ -500,13 +500,17 @@ def _apply_settings(payload):
     if captcha_touch:
         next_config["captcha_provider"] = captcha_provider
         next_config["captcha_api_key"] = str(merged["captcha_api_key"] or "").strip()
-        default_captcha_base = "https://api.yescaptcha.com" if captcha_provider == "yescaptcha" else "https://api.2captcha.com"
+        default_captcha_base = {
+            "yescaptcha": "https://api.yescaptcha.com",
+            "capmonster": "https://api.capmonster.cloud",
+        }.get(captcha_provider, "https://api.2captcha.com")
         next_config["captcha_api_base"] = _clean_url(merged["captcha_api_base"], "打码 API 地址") or default_captcha_base
         next_config["captcha_timeout"] = timeout
         next_config["captcha_poll_interval"] = poll
         next_config["turnstile_extension_path"] = str(merged["turnstile_extension_path"] or "").strip()
-        if captcha_provider in {"2captcha", "yescaptcha"} and not next_config["captcha_api_key"]:
-            raise ValueError(("YesCaptcha" if captcha_provider == "yescaptcha" else "2Captcha") + " 需要填写 API Key")
+        if captcha_provider in {"2captcha", "yescaptcha", "capmonster"} and not next_config["captcha_api_key"]:
+            provider_name = {"yescaptcha": "YesCaptcha", "capmonster": "CapMonster Cloud"}.get(captcha_provider, "2Captcha")
+            raise ValueError(provider_name + " 需要填写 API Key")
     if egress_touch:
         next_config["proxy_enabled"] = _as_bool(merged["proxy_enabled"])
         next_config["http_proxy"] = str(merged["http_proxy"] or "").strip()

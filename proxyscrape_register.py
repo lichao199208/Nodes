@@ -629,7 +629,11 @@ def solve_turnstile_browser(headless=False, timeout=120):
 
 def _captcha_post(path, payload):
     """Call a createTask-compatible captcha API and normalize errors."""
-    provider_label = "YesCaptcha" if CAPTCHA_PROVIDER.lower() == "yescaptcha" else "2Captcha"
+    provider_label = {
+        "yescaptcha": "YesCaptcha",
+        "capmonster": "CapMonster Cloud",
+        "capmonstercloud": "CapMonster Cloud",
+    }.get(CAPTCHA_PROVIDER.lower(), "2Captcha")
     try:
         response = requests.post(
             f"{CAPTCHA_API_BASE}{path}", json=payload, timeout=30,
@@ -650,7 +654,11 @@ def _captcha_post(path, payload):
 
 def solve_turnstile_2captcha(timeout=None):
     """Create and poll a proxyless Turnstile task through an API provider."""
-    provider_label = "YesCaptcha" if CAPTCHA_PROVIDER.lower() == "yescaptcha" else "2Captcha"
+    provider_label = {
+        "yescaptcha": "YesCaptcha",
+        "capmonster": "CapMonster Cloud",
+        "capmonstercloud": "CapMonster Cloud",
+    }.get(CAPTCHA_PROVIDER.lower(), "2Captcha")
     if not CAPTCHA_API_KEY:
         raise RuntimeError(f"captcha_provider={CAPTCHA_PROVIDER}，但未配置 captcha_api_key")
 
@@ -697,6 +705,13 @@ def solve_turnstile_yescaptcha(timeout=None):
     return solve_turnstile_2captcha(timeout=timeout)
 
 
+def solve_turnstile_capmonster(timeout=None):
+    """Solve Turnstile through CapMonster Cloud's compatible task API."""
+    if not CAPTCHA_API_KEY:
+        raise RuntimeError("captcha_provider=capmonster，但未配置 captcha_api_key")
+    return solve_turnstile_2captcha(timeout=timeout)
+
+
 def solve_turnstile(headless=False, timeout=None):
     """Dispatch Turnstile solving to the configured provider."""
     provider = CAPTCHA_PROVIDER.replace("-", "").replace("_", "")
@@ -704,6 +719,8 @@ def solve_turnstile(headless=False, timeout=None):
         return solve_turnstile_2captcha(timeout=timeout)
     if provider in {"yescaptcha", "yescap"}:
         return solve_turnstile_yescaptcha(timeout=timeout)
+    if provider in {"capmonster", "capmonstercloud"}:
+        return solve_turnstile_capmonster(timeout=timeout)
     if provider in {"browser", "local", "extension"}:
         return solve_turnstile_browser(
             headless=headless,
