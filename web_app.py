@@ -504,7 +504,20 @@ def _apply_settings(payload):
             "yescaptcha": "https://api.yescaptcha.com",
             "capmonster": "https://api.capmonster.cloud",
         }.get(captcha_provider, "https://api.2captcha.com")
-        next_config["captcha_api_base"] = _clean_url(merged["captcha_api_base"], "打码 API 地址") or default_captcha_base
+        submitted_captcha_base = _clean_url(merged["captcha_api_base"], "打码 API 地址")
+        known_captcha_bases = {
+            "https://api.2captcha.com",
+            "https://api.yescaptcha.com",
+            "https://api.capmonster.cloud",
+        }
+        # A cached frontend may submit the previous provider's well-known URL.
+        # Correct that mismatch while still allowing custom compatible endpoints.
+        if not submitted_captcha_base or (
+            submitted_captcha_base.rstrip("/") in known_captcha_bases
+            and submitted_captcha_base.rstrip("/") != default_captcha_base
+        ):
+            submitted_captcha_base = default_captcha_base
+        next_config["captcha_api_base"] = submitted_captcha_base
         next_config["captcha_timeout"] = timeout
         next_config["captcha_poll_interval"] = poll
         next_config["turnstile_extension_path"] = str(merged["turnstile_extension_path"] or "").strip()
